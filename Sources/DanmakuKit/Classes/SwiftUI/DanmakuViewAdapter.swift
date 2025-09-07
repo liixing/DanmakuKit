@@ -34,37 +34,37 @@ public struct DanmakuViewAdapter: PlatformViewRepresentable {
     #endif
 
     @ObservedObject var coordinator: Coordinator
-
+    
     public init(coordinator: Coordinator) {
         self.coordinator = coordinator
     }
-
+    
     #if canImport(UIKit)
     public func makeUIView(context: Context) -> UIViewType {
         return coordinator.makeView()
     }
-
+    
     public func updateUIView(_ uiView: UIViewType, context: Context) {}
     #elseif os(macOS)
     public func makeNSView(context: Context) -> NSViewType {
         return coordinator.makeView()
     }
-
+    
     public func updateNSView(_ nsView: NSViewType, context: Context) {}
     #endif
 
     public func makeCoordinator() -> Coordinator {
         return coordinator
     }
-
+    
     public class Coordinator: ObservableObject {
-
+        
         public init() {}
-
+        
         public private(set) var danmakuView: DanmakuView?
-
+        
         private var frameObserver: Any?
-
+        
         public weak var danmakuViewDelegate: DanmakuViewDelegate? {
             willSet {
                 danmakuView?.delegate = newValue
@@ -87,7 +87,7 @@ public struct DanmakuViewAdapter: PlatformViewRepresentable {
         public func sync(danmaku: DanmakuCellModel, at progress: Float) {
             danmakuView?.sync(danmaku: danmaku, at: progress)
         }
-
+        
         func makeView() -> DanmakuView {
             danmakuView = DanmakuView(frame: .zero)
             #if canImport(UIKit)
@@ -105,7 +105,7 @@ public struct DanmakuViewAdapter: PlatformViewRepresentable {
             #endif
             return danmakuView!
         }
-
+        
     }
-
+    
 }
