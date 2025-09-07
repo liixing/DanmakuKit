@@ -12,13 +12,13 @@ import AppKit
 #endif
 
 class Sentinel {
-
+    
     private var value: Int32 = 0
-
+    
     public func getValue() -> Int32 {
         return value
     }
-
+    
     public func increase() {
         #if os(macOS)
         _ = OSAtomicIncrement32(&value)
@@ -29,20 +29,20 @@ class Sentinel {
         p.deallocate()
         #endif
     }
-
+    
 }
 
 public class DanmakuAsyncLayer: CALayer {
-
+    
     /// When true, it is drawn asynchronously and is ture by default.
     public var displayAsync = true
-
+    
     public var willDisplay: ((_ layer: DanmakuAsyncLayer) -> Void)?
-
+    
     public var displaying: ((_ context: CGContext, _ size: CGSize, _ isCancelled:(() -> Bool)) -> Void)?
-
+    
     public var didDisplay: ((_ layer: DanmakuAsyncLayer, _ finished: Bool) -> Void)?
-
+    
     /// The number of queues to draw the danmaku.
     public static var drawDanmakuQueueCount = 16 {
         didSet {
@@ -51,11 +51,11 @@ public class DanmakuAsyncLayer: CALayer {
             createPoolIfNeed()
         }
     }
-
+    
     private let sentinel = Sentinel()
-
+    
     private static var pool: DanmakuQueuePool?
-
+    
     override init() {
         super.init()
         #if os(macOS)
@@ -64,30 +64,30 @@ public class DanmakuAsyncLayer: CALayer {
         contentsScale = UIScreen.main.scale
         #endif
     }
-
+    
     override init(layer: Any) {
         super.init(layer: layer)
     }
-
+    
     required init?(coder: NSCoder) {
         super.init(coder: coder)
     }
-
+    
     deinit {
         sentinel.increase()
     }
-
+    
     public override func setNeedsDisplay() {
         //1. Cancel the last drawing
         sentinel.increase()
         //2. call super
         super.setNeedsDisplay()
     }
-
+    
     public override func display() {
         display(isAsync: displayAsync)
     }
-
+    
     private func display(isAsync: Bool) {
         guard displaying != nil, bounds.size.width > 0, bounds.size.height > 0 else {
             willDisplay?(self)
@@ -95,7 +95,7 @@ public class DanmakuAsyncLayer: CALayer {
             didDisplay?(self, true)
             return
         }
-
+        
         if isAsync {
             willDisplay?(self)
             let value = sentinel.getValue()
@@ -189,7 +189,7 @@ public class DanmakuAsyncLayer: CALayer {
                 }
                 #endif
             }
-
+            
         } else {
             sentinel.increase()
             willDisplay?(self)
@@ -239,14 +239,14 @@ public class DanmakuAsyncLayer: CALayer {
             #endif
         }
     }
-
+    
     private static func createPoolIfNeed() {
         guard DanmakuAsyncLayer.pool == nil else { return }
         DanmakuAsyncLayer.pool = DanmakuQueuePool(name: "com.DanmakuKit.DanmakuAsynclayer", queueCount: DanmakuAsyncLayer.drawDanmakuQueueCount, qos: .userInteractive)
     }
-
+    
     private lazy var queue: DispatchQueue = {
         return DanmakuAsyncLayer.pool?.queue ?? DispatchQueue(label: "com.DanmakuKit.DanmakuAsynclayer")
     }()
-
+    
 }
