@@ -17,43 +17,43 @@ let MAX_FLOAT_X = CGFloat.infinity / 2.0
 //MARK: DanmakuTrack
 
 protocol DanmakuTrack {
-
+    
     var positionY: CGFloat { get set }
-
+    
     var index: UInt { get set }
-
+    
     var stopClosure: ((_ cell: DanmakuCell) -> Void)? { get set }
-
+    
     var danmakuCount: Int { get }
-
+    
     var isOverlap: Bool { get set }
-
+    
     var playingSpeed: Float { get set }
-
+    
     init(view: PlatformView)
-
+    
     func shoot(danmaku: DanmakuCell)
-
+    
     func canShoot(danmaku: DanmakuCellModel) -> Bool
-
+    
     func play()
-
+    
     func pause()
-
+    
     func stop()
-
+    
     func pause(_ danmaku: DanmakuCellModel) -> Bool
-
+    
     func play(_ danmaku: DanmakuCellModel) -> Bool
-
+    
     func sync(_ danmaku: DanmakuCell, at progress: Float)
-
+    
     func syncAndPlay(_ danmaku: DanmakuCell, at progress: Float)
-
+    
     func canSync(_ danmaku: DanmakuCellModel, at progress: Float) -> Bool
-
+    
     func clean()
-
+    
 }
 
 let FLOATING_ANIMATION_KEY = "FLOATING_ANIMATION_KEY"
@@ -75,7 +75,7 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
             #endif
         }
     }
-
+    
     var index: UInt = 0
     
     var stopClosure: ((_ cell: DanmakuCell) -> Void)?
@@ -91,7 +91,7 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
     private var cells: [DanmakuCell] = []
     
     private weak var view: PlatformView?
-
+    
     required init(view: PlatformView) {
         self.view = view
     }
@@ -164,7 +164,7 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         #endif
         return true
     }
-
+    
     func pause() {
         cells.forEach {
             let rf = $0.realFrame
@@ -194,7 +194,7 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         #endif
         return true
     }
-
+    
     func stop() {
         cells.forEach {
             $0.removeFromSuperview()
@@ -330,7 +330,7 @@ class DanmakuVerticalTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
     var playingSpeed: Float = 1.0
     
     private weak var view: PlatformView?
-
+    
     required init(view: PlatformView) {
         self.view = view
     }
@@ -374,7 +374,7 @@ class DanmakuVerticalTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         #endif
         return true
     }
-
+    
     func pause() {
         cells.forEach {
             #if os(macOS)
@@ -400,7 +400,7 @@ class DanmakuVerticalTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         #endif
         return true
     }
-
+    
     func stop() {
         cells.forEach {
             $0.removeFromSuperview()
