@@ -70,9 +70,7 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
             // iOS can adjust layer.position.y to keep centered vertically on layout changes.
             #if !os(macOS)
             cells.forEach {
-                var p = $0.layer.position
-                p.y = positionY
-                $0.layer.position = p
+                $0.layer.position.y = positionY
             }
             #endif
         }
@@ -103,11 +101,7 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         #if os(macOS)
         danmaku.frame = CGRect(x: view!.bounds.width, y: positionY - danmaku.bounds.height / 2.0, width: danmaku.bounds.width, height: danmaku.bounds.height)
         #else
-        #if os(macOS)
-        danmaku.layer?.position = CGPoint(x: view!.bounds.width + danmaku.bounds.width / 2.0, y: positionY)
-        #else
         danmaku.layer.position = CGPoint(x: view!.bounds.width + danmaku.bounds.width / 2.0, y: positionY)
-        #endif
         #endif
         danmaku.model?.track = index
         prepare(danmaku: danmaku)
@@ -173,8 +167,7 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
 
     func pause() {
         cells.forEach {
-            let rf = $0.realFrame
-            $0.frame.origin = CGPoint(x: rf.midX - $0.bounds.width / 2.0, y: rf.midY - $0.bounds.height / 2.0)
+            $0.center = CGPoint(x: $0.realFrame.midX, y: $0.realFrame.midY)
             #if os(macOS)
             $0.layer?.removeAllAnimations()
             #else
@@ -187,8 +180,7 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         guard let findCell = cells.first(where: { (c) -> Bool in
             return c.model?.isEqual(to: danmaku) ?? false
         }) else { return false }
-        let rf = findCell.realFrame
-        findCell.frame.origin = CGPoint(x: rf.midX - findCell.bounds.width / 2.0, y: rf.midY - findCell.bounds.height / 2.0)
+        findCell.center = CGPoint(x: findCell.realFrame.midX, y: findCell.realFrame.midY)
         #if os(macOS)
         if let layer = findCell.layer {
             let pausedTime = layer.convertTime(CACurrentMediaTime(), from: nil)
@@ -207,11 +199,7 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
             #if os(macOS)
             $0.layer?.removeAllAnimations()
             #else
-            #if os(macOS)
-            $0.layer?.removeAllAnimations()
-            #else
             $0.layer.removeAllAnimations()
-            #endif
             #endif
         }
         cells.removeAll()
