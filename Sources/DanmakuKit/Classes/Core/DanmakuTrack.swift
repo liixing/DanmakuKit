@@ -167,7 +167,8 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
 
     func pause() {
         cells.forEach {
-            $0.center = CGPoint(x: $0.realFrame.midX, y: $0.realFrame.midY)
+            let rf = $0.realFrame
+            $0.frame.origin = CGPoint(x: rf.midX - $0.bounds.width / 2.0, y: rf.midY - $0.bounds.height / 2.0)
             #if os(macOS)
             $0.layer?.removeAllAnimations()
             #else
@@ -180,7 +181,8 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         guard let findCell = cells.first(where: { (c) -> Bool in
             return c.model?.isEqual(to: danmaku) ?? false
         }) else { return false }
-        findCell.center = CGPoint(x: findCell.realFrame.midX, y: findCell.realFrame.midY)
+        let rf = findCell.realFrame
+        findCell.frame.origin = CGPoint(x: rf.midX - findCell.bounds.width / 2.0, y: rf.midY - findCell.bounds.height / 2.0)
         #if os(macOS)
         if let layer = findCell.layer {
             let pausedTime = layer.convertTime(CACurrentMediaTime(), from: nil)
@@ -254,6 +256,7 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
             if let cell = findCell {
                 #if os(macOS)
                 cell.layer?.removeAllAnimations()
+                cell.layer?.opacity = 0
                 // Avoid invalid geometry warnings on AppKit; do not push to infinity.
                 cell.leaveTrack()
                 stopClosure?(cell)
@@ -454,6 +457,7 @@ class DanmakuVerticalTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
             if let cell = findCell {
                 #if os(macOS)
                 danmaku.layer?.removeAllAnimations()
+                cell.layer?.opacity = 0
                 danmaku.leaveTrack()
                 stopClosure?(cell)
                 #else
