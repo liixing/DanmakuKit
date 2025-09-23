@@ -1,3 +1,4 @@
+#if canImport(UIKit)
 //
 //  DanmakuGifCellModel.swift
 //  DanmakuKit
@@ -45,3 +46,4 @@ public extension DanmakuGifCellModel {
     }
     
 }
+#endif

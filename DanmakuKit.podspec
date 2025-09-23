@@ -27,6 +27,7 @@ Pod::Spec.new do |s|
   s.source           = { :git => 'https://github.com/qyz777/DanmakuKit.git', :tag => s.version.to_s }
 
   s.ios.deployment_target = '10.0'
+  s.osx.deployment_target = '10.15'
   s.swift_versions = ['5.0']
   s.default_subspecs = ['Core']
   

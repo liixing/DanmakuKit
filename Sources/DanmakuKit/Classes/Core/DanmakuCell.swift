@@ -1,3 +1,4 @@
+
 //
 //  DanmakuCell.swift
 //  DanmakuKit
@@ -5,22 +6,38 @@
 //  Created by Q YiZhong on 2020/8/16.
 //
 
-import UIKit
+import Foundation
+// Use shared platform typealiases
+// (see PlatformTypes.swift)
 
-open class DanmakuCell: UIView {
+open class DanmakuCell: PlatformView {
 
     public var model: DanmakuCellModel?
     
     public internal(set) var animationTime: TimeInterval = 0
     
     var animationBeginTime: TimeInterval = 0
-    
+
+    #if canImport(UIKit)
     public override class var layerClass: AnyClass {
         return DanmakuAsyncLayer.self
     }
-    
+    #else
+    public override func makeBackingLayer() -> CALayer {
+        return DanmakuAsyncLayer()
+    }
+
+    public override var wantsLayer: Bool {
+        get { return true }
+        set { super.wantsLayer = newValue }
+    }
+    #endif
+
     public required override init(frame: CGRect) {
         super.init(frame: frame)
+        #if os(macOS)
+        self.wantsLayer = true
+        #endif
         setupLayer()
     }
     
@@ -59,27 +76,43 @@ open class DanmakuCell: UIView {
     
     /// This method can trigger the rendering process, the content can be re-rendered in the displaying(_:_:_:) method.
     public func redraw() {
+        #if os(macOS)
+        layer?.setNeedsDisplay()
+        #else
         layer.setNeedsDisplay()
+        #endif
     }
-       
+    
 }
 
 extension DanmakuCell {
     
     var realFrame: CGRect {
-        if layer.presentation() != nil {
-            return layer.presentation()!.frame
+        #if os(macOS)
+        if let presentation = layer?.presentation() {
+            return presentation.frame
         } else {
             return frame
         }
+        #else
+        if let presentation = layer.presentation() {
+            return presentation.frame
+        } else {
+            return frame
+        }
+        #endif
     }
     
     func setupLayer() {
         guard let layer = layer as? DanmakuAsyncLayer else { return }
+
+        #if os(macOS)
+        layer.contentsScale = PlatformScreen.main?.backingScaleFactor ?? 1.0
+        #else
+        layer.contentsScale = PlatformScreen.main.scale
+        #endif
         
-        layer.contentsScale = UIScreen.main.scale
-        
-        layer.willDisplay = { [weak self] (layer) in
+        layer.willDisplay = { [weak self] _ in
             guard let strongSelf = self else { return }
             strongSelf.willDisplay()
         }
@@ -89,7 +122,7 @@ extension DanmakuCell {
             strongSelf.displaying(context, size, isCancelled())
         }
         
-        layer.didDisplay = { [weak self] (layer, finished) in
+        layer.didDisplay = { [weak self] (_, finished) in
             guard let strongSelf = self else { return }
             strongSelf.didDisplay(finished)
         }

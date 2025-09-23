@@ -5,7 +5,12 @@
 //  Created by Q YiZhong on 2020/8/16.
 //
 
+// Use shared platform typealiases (PlatformView) from PlatformTypes.swift
+#if os(macOS)
+import AppKit
+#else
 import UIKit
+#endif
 
 public protocol DanmakuViewDelegate: AnyObject {
     
@@ -69,7 +74,7 @@ public enum DanmakuStatus {
     case stop
 }
 
-public class DanmakuView: UIView {
+public class DanmakuView: PlatformView {
     
     public weak var delegate: DanmakuViewDelegate?
     
@@ -167,6 +172,8 @@ public class DanmakuView: UIView {
             assert(newValue > 0, "Danmaku playing speed must be over 0.")
         }
         didSet {
+            // Apply iOS behavior on all platforms: pause -> update -> short delay -> play
+            // This ensures existing on-screen danmaku recompute durations with the new speed.
             update {
                 for i in 0..<floatingTracks.count {
                     var track = floatingTracks[i]
@@ -195,23 +202,50 @@ public class DanmakuView: UIView {
     private var viewHeight: CGFloat {
         return bounds.height * displayArea
     }
-
+    
     public override init(frame: CGRect) {
         super.init(frame: frame)
         recalculateTracks()
+        #if os(macOS)
+        // iOS 侧有“presentation 命中”的链路，系统配合更友好；macOS 侧如果仅靠 cell 的 NSClickGestureRecognizer，很容易因为动画导致的“视图/图层几何不一致”而 miss。所以在这里处理
+        let containerClick = NSClickGestureRecognizer(target: self, action: #selector(containerDidClick(_:)))
+        self.addGestureRecognizer(containerClick)
+        #endif
     }
     
     required init?(coder: NSCoder) {
         super.init(coder: coder)
     }
+    #if os(macOS)
+    // Use a top-left origin like iOS so tracks are laid out from the top.
+    public override var isFlipped: Bool { true }
+    
+    public override func layout() {
+        super.layout()
+        recalculateTracks()
+    }
+    #endif
     
     deinit {
         stop()
     }
     
+    #if os(macOS)
+    public override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !isHidden, alphaValue > 0 else { return nil }
+        guard self.bounds.contains(point) else { return nil }
+        for sub in subviews.reversed() {
+            var local = self.convert(point, to: sub)
+            if let presentation = sub.layer?.presentation() {
+                local = self.layer?.convert(point, to: presentation) ?? local
+            }
+            if let found = sub.hitTest(local) { return found }
+        }
+        return self
+    }
+    #else
     public override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         guard self.point(inside: point, with: event) else { return nil }
-        
         for i in (0..<subviews.count).reversed() {
             let subView = subviews[i]
             var newPoint: CGPoint
@@ -220,13 +254,12 @@ public class DanmakuView: UIView {
             } else {
                 newPoint = convert(point, to: subView)
             }
-            if let findView = subView.hitTest(newPoint, with: event) {
-                return findView
-            }
+            if let findView = subView.hitTest(newPoint, with: event) { return findView }
         }
         return nil
     }
-
+    #endif
+    
 }
 
 public extension DanmakuView {
@@ -264,9 +297,8 @@ public extension DanmakuView {
         if cell.superview == nil {
             addSubview(cell)
         }
-        
         delegate?.danmakuView(self, willDisplay: cell)
-        cell.layer.setNeedsDisplay()
+        cell.redraw()
         shootTrack.shoot(danmaku: cell)
     }
     
@@ -411,9 +443,8 @@ public extension DanmakuView {
         if cell.superview == nil {
             addSubview(cell)
         }
-        
         delegate?.danmakuView(self, willDisplay: cell)
-        cell.layer.setNeedsDisplay()
+        cell.redraw()
         if status == .play {
             syncTrack.syncAndPlay(cell, at: progress)
         } else {
@@ -464,6 +495,7 @@ private extension DanmakuView {
                 strongSelf.cellPlayingStop(cell)
             }
             track.index = UInt(i)
+            track.playingSpeed = playingSpeed
             track.positionY = CGFloat(i) * trackHeight + trackHeight / 2.0 + paddingTop + offsetY
         }
     }
@@ -489,6 +521,7 @@ private extension DanmakuView {
                 strongSelf.cellPlayingStop(cell)
             }
             track.index = UInt(i)
+            track.playingSpeed = playingSpeed
             track.positionY = CGFloat(i) * trackHeight + trackHeight / 2.0 + paddingTop + offsetY
         }
     }
@@ -515,7 +548,12 @@ private extension DanmakuView {
             }
             let index = bottomTracks.count - i - 1
             track.index = UInt(index)
+            track.playingSpeed = playingSpeed
+            #if os(macOS)
+            track.positionY = bounds.height - CGFloat(index) * trackHeight - trackHeight / 2.0 - paddingBottom - offsetY
+            #else
             track.positionY = bounds.height - CGFloat(index) * trackHeight - trackHeight / 2.0 - paddingTop - offsetY
+            #endif
         }
     }
     
@@ -609,8 +647,12 @@ private extension DanmakuView {
             }
             cell = cls.init(frame: frame)
             cell?.model = danmaku
+            #if os(macOS)
+            // Use container-level click recognizer only
+            #else
             let tap = UITapGestureRecognizer(target: self, action: #selector(danmakuDidTap(_:)))
             cell?.addGestureRecognizer(tap)
+            #endif
         } else {
             cell?.frame = frame
             cell?.model = danmaku
@@ -629,6 +671,25 @@ private extension DanmakuView {
         return cell
     }
     
+    #if os(macOS)
+    @objc
+    private func containerDidClick(_ gesture: NSClickGestureRecognizer) {
+        let p = gesture.location(in: self)
+        for sub in subviews.reversed() {
+            guard let cell = sub as? DanmakuCell else { continue }
+            let rf = cell.realFrame
+            let rect = CGRect(x: rf.midX - cell.bounds.width / 2.0,
+                              y: rf.midY - cell.bounds.height / 2.0,
+                              width: cell.bounds.width,
+                              height: cell.bounds.height)
+            if rect.contains(p) {
+                delegate?.danmakuView(self, didTapped: cell)
+                break
+            }
+        }
+    }
+    #endif
+    
     func appendCellToPool(_ cell: DanmakuCell) {
         guard let cs = cell.model?.cellClass else {
             cell.removeFromSuperview()
@@ -643,6 +704,8 @@ private extension DanmakuView {
     }
     
     func cellPlayingStop(_ cell: DanmakuCell) {
+        // Match DanmuKitMac behavior: always remove from superview when a danmaku ends,
+        // then optionally append to pool for reuse to avoid lingering views.
         delegate?.danmakuView(self, didEndDisplaying: cell)
         if enableCellReusable {
             self.appendCellToPool(cell)
@@ -651,10 +714,12 @@ private extension DanmakuView {
         }
     }
     
+    #if canImport(UIKit)
     @objc
     func danmakuDidTap(_ tap: UITapGestureRecognizer) {
         guard let view = tap.view as? DanmakuCell else { return }
         delegate?.danmakuView(self, didTapped: view)
     }
+    #endif
     
 }

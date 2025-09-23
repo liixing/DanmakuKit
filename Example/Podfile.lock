@@ -1,8 +1,8 @@
 PODS:
-  - DanmakuKit/Core (1.5.0)
-  - DanmakuKit/Gif (1.5.0):
+  - DanmakuKit/Core (1.5.2)
+  - DanmakuKit/Gif (1.5.2):
     - DanmakuKit/Core
-  - DanmakuKit/SwiftUI (1.5.0):
+  - DanmakuKit/SwiftUI (1.5.2):
     - DanmakuKit/Core
   - DeviceKit (4.1.0)
   - SwiftyJSON (5.0.1)
@@ -24,10 +24,10 @@ EXTERNAL SOURCES:
     :path: "../"
 
 SPEC CHECKSUMS:
-  DanmakuKit: bfe1c8a742e3bb67d84e06653d5c102a59a482bf
+  DanmakuKit: d740bb252cfb592c4f79b01288a57abfed9c1703
   DeviceKit: aaa4743a15ef1e2021fe654dffa32a3ed15672aa
   SwiftyJSON: 2f33a42c6fbc52764d96f13368585094bfd8aa5e
 
 PODFILE CHECKSUM: 6307ed3f74934bb78a7647f99f78eae2cb34976a
 
-COCOAPODS: 1.14.3
+COCOAPODS: 1.16.2

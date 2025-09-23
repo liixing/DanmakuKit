@@ -1,3 +1,4 @@
+#if canImport(UIKit)
 //
 //  DanmakuGifCell.swift
 //  DanmakuKit
@@ -75,4 +76,4 @@ open class DanmakuGifCell: DanmakuCell {
     }
     
 }
-
+#endif

@@ -37,3 +37,7 @@ Carthage/Build
 Example/Pods/
 Example/xcuserdata/
 Example/*.xccheckout
+
+DanmuKitMacExample/Pods/
+DanmuKitMacExample/xcuserdata/
+DanmuKitMacExample/*.xccheckout

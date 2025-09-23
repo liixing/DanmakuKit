@@ -5,7 +5,8 @@
 //  Created by Q YiZhong on 2020/8/16.
 //
 
-import UIKit
+import Foundation
+import CoreGraphics
 
 public enum DanmakuCellType {
     case floating

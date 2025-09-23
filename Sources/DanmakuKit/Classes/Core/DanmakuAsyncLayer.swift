@@ -5,7 +5,11 @@
 //  Created by Q YiZhong on 2020/8/16.
 //
 
+#if canImport(UIKit)
 import UIKit
+#else
+import AppKit
+#endif
 
 class Sentinel {
     
@@ -16,10 +20,14 @@ class Sentinel {
     }
     
     public func increase() {
+        #if os(macOS)
+        _ = OSAtomicIncrement32(&value)
+        #else
         let p = UnsafeMutablePointer<Int32>.allocate(capacity: 1)
         p.pointee = value
         OSAtomicIncrement32(p)
         p.deallocate()
+        #endif
     }
     
 }
@@ -50,7 +58,11 @@ public class DanmakuAsyncLayer: CALayer {
     
     override init() {
         super.init()
+        #if os(macOS)
+        contentsScale = NSScreen.main?.backingScaleFactor ?? 1.0
+        #else
         contentsScale = UIScreen.main.scale
+        #endif
     }
     
     override init(layer: Any) {
@@ -96,6 +108,26 @@ public class DanmakuAsyncLayer: CALayer {
             let backgroundColor = (opaque && self.backgroundColor != nil) ? self.backgroundColor : nil
             queue.async {
                 guard !isCancelled() else { return }
+                #if os(macOS)
+                let colorSpace = CGColorSpaceCreateDeviceRGB()
+                let alphaInfo: CGImageAlphaInfo = opaque ? .noneSkipLast : .premultipliedLast
+                guard let context = CGContext(data: nil, width: Int(size.width * scale), height: Int(size.height * scale), bitsPerComponent: 8, bytesPerRow: 0, space: colorSpace, bitmapInfo: alphaInfo.rawValue) else {
+                    return
+                }
+                context.scaleBy(x: scale, y: scale)
+                if opaque {
+                    context.saveGState()
+                    if backgroundColor == nil || (backgroundColor?.alpha ?? 0) < 1 {
+                        context.setFillColor(NSColor.white.cgColor)
+                        context.fill(CGRect(origin: .zero, size: size))
+                    }
+                    if let bg = backgroundColor {
+                        context.setFillColor(bg)
+                        context.fill(CGRect(origin: .zero, size: size))
+                    }
+                    context.restoreGState()
+                }
+                #else
                 UIGraphicsBeginImageContextWithOptions(size, opaque, scale)
                 guard let context = UIGraphicsGetCurrentContext() else {
                     UIGraphicsEndImageContext()
@@ -115,14 +147,30 @@ public class DanmakuAsyncLayer: CALayer {
                     }
                     context.restoreGState()
                 }
+                #endif
                 self.displaying?(context, size, isCancelled)
                 if isCancelled() {
+                    #if os(macOS)
+                    // no UIGraphics context to end on macOS
+                    #else
                     UIGraphicsEndImageContext()
+                    #endif
                     DispatchQueue.main.async {
                         self.didDisplay?(self, false)
                     }
                     return
                 }
+                #if os(macOS)
+                let cgImage = context.makeImage()
+                if isCancelled() {
+                    DispatchQueue.main.async { self.didDisplay?(self, false) }
+                    return
+                }
+                DispatchQueue.main.async {
+                    if isCancelled() { self.didDisplay?(self, false) }
+                    else { self.contents = cgImage; self.didDisplay?(self, true) }
+                }
+                #else
                 let image = UIGraphicsGetImageFromCurrentImageContext()
                 UIGraphicsEndImageContext()
                 if isCancelled() {
@@ -139,11 +187,45 @@ public class DanmakuAsyncLayer: CALayer {
                         self.didDisplay?(self, true)
                     }
                 }
+                #endif
             }
             
         } else {
             sentinel.increase()
             willDisplay?(self)
+            #if os(macOS)
+            let size = bounds.size
+            let scale = contentsScale
+            let opaque = isOpaque
+            let colorSpace = CGColorSpaceCreateDeviceRGB()
+            let alphaInfo: CGImageAlphaInfo = opaque ? .noneSkipLast : .premultipliedLast
+            guard let context = CGContext(data: nil,
+                                          width: Int(size.width * scale),
+                                          height: Int(size.height * scale),
+                                          bitsPerComponent: 8,
+                                          bytesPerRow: 0,
+                                          space: colorSpace,
+                                          bitmapInfo: alphaInfo.rawValue) else {
+                return
+            }
+            context.scaleBy(x: scale, y: scale)
+            if opaque {
+                context.saveGState()
+                if self.backgroundColor == nil || (self.backgroundColor?.alpha ?? 0) < 1 {
+                    context.setFillColor(NSColor.white.cgColor)
+                    context.fill(CGRect(origin: .zero, size: size))
+                }
+                if let bg = self.backgroundColor {
+                    context.setFillColor(bg)
+                    context.fill(CGRect(origin: .zero, size: size))
+                }
+                context.restoreGState()
+            }
+            displaying?(context, bounds.size, {() -> Bool in return false})
+            let image = context.makeImage()
+            contents = image
+            didDisplay?(self, true)
+            #else
             UIGraphicsBeginImageContextWithOptions(bounds.size, isOpaque, contentsScale)
             guard let context = UIGraphicsGetCurrentContext() else {
                 UIGraphicsEndImageContext()
@@ -154,6 +236,7 @@ public class DanmakuAsyncLayer: CALayer {
             UIGraphicsEndImageContext()
             contents = image?.cgImage
             didDisplay?(self, true)
+            #endif
         }
     }
     

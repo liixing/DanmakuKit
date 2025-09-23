@@ -1,0 +1,6 @@
+use_frameworks!
+
+target 'DanmuKitMacExample' do
+  use_frameworks!
+  pod 'DanmakuKit', :path => '../', :subspecs => ['Core', 'Gif', 'SwiftUI']
+end

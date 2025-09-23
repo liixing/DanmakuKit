@@ -1,0 +1,22 @@
+PODS:
+  - DanmakuKit/Core (1.5.2)
+  - DanmakuKit/Gif (1.5.2):
+    - DanmakuKit/Core
+  - DanmakuKit/SwiftUI (1.5.2):
+    - DanmakuKit/Core
+
+DEPENDENCIES:
+  - DanmakuKit/Core (from `../`)
+  - DanmakuKit/Gif (from `../`)
+  - DanmakuKit/SwiftUI (from `../`)
+
+EXTERNAL SOURCES:
+  DanmakuKit:
+    :path: "../"
+
+SPEC CHECKSUMS:
+  DanmakuKit: 97302f7335ba23d3c7c6e93733af6287cfc7f65a
+
+PODFILE CHECKSUM: 95f29ecba38322b9eb3e6cefb9c7f03f7fc06c36
+
+COCOAPODS: 1.16.2
