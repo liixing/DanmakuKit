@@ -297,6 +297,19 @@ public extension DanmakuView {
         if cell.superview == nil {
             addSubview(cell)
         }
+        // Keep top/bottom danmaku always above floating danmaku
+        if danmaku.type != .floating {
+            #if os(macOS)
+            self.sortSubviews({ v1, v2, _ in
+                let isTop1 = (v1 as? DanmakuCell)?.model?.type != .floating
+                let isTop2 = (v2 as? DanmakuCell)?.model?.type != .floating
+                if isTop1 == isTop2 { return .orderedSame }
+                return isTop1 ? .orderedDescending : .orderedAscending
+            }, context: nil)
+            #else
+            bringSubviewToFront(cell)
+            #endif
+        }
         delegate?.danmakuView(self, willDisplay: cell)
         cell.redraw()
         shootTrack.shoot(danmaku: cell)
@@ -442,6 +455,18 @@ public extension DanmakuView {
         
         if cell.superview == nil {
             addSubview(cell)
+        }
+        if danmaku.type != .floating {
+            #if os(macOS)
+            self.sortSubviews({ v1, v2, _ in
+                let isTop1 = (v1 as? DanmakuCell)?.model?.type != .floating
+                let isTop2 = (v2 as? DanmakuCell)?.model?.type != .floating
+                if isTop1 == isTop2 { return .orderedSame }
+                return isTop1 ? .orderedDescending : .orderedAscending
+            }, context: nil)
+            #else
+            bringSubviewToFront(cell)
+            #endif
         }
         delegate?.danmakuView(self, willDisplay: cell)
         cell.redraw()

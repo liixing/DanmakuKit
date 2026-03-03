@@ -119,7 +119,8 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         let preWidth = view!.bounds.width + cell.frame.width
         let nextWidth = view!.bounds.width + danmaku.size.width
         let preRight = max(cell.realFrame.maxX, 0)
-        let preCellTime = min(preRight / preWidth * CGFloat(cellModel.displayTime), CGFloat(cellModel.displayTime))
+        // remaining time = (remaining distance / total distance) * total displayTime
+        let preCellTime = (preRight / preWidth) * CGFloat(cellModel.displayTime)
         //2. 计算出路程差，减10防止刚好追上
         let distance = view!.bounds.width - preRight - 10
         guard distance >= 0 else {
