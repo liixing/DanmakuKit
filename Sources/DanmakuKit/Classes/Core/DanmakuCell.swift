@@ -124,6 +124,18 @@ extension DanmakuCell {
         
         layer.didDisplay = { [weak self] (_, finished) in
             guard let strongSelf = self else { return }
+            // Reveal cell after async rendering completes (top/bottom danmaku start hidden)
+            if finished {
+                #if os(macOS)
+                if strongSelf.layer?.opacity == 0 {
+                    strongSelf.layer?.opacity = 1
+                }
+                #else
+                if strongSelf.layer.opacity == 0 {
+                    strongSelf.layer.opacity = 1
+                }
+                #endif
+            }
             strongSelf.didDisplay(finished)
         }
     }

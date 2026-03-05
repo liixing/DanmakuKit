@@ -342,12 +342,17 @@ class DanmakuVerticalTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         let originX = (view!.bounds.width - danmaku.bounds.width) / 2.0
         let originY = positionY - danmaku.bounds.height / 2.0
         danmaku.frame = CGRect(x: originX, y: originY, width: danmaku.bounds.width, height: danmaku.bounds.height)
-        danmaku.layer?.opacity = 1
         #else
         danmaku.layer.position = CGPoint(x: view!.bounds.width / 2.0, y: positionY)
         #endif
         danmaku.model?.track = index
         prepare(danmaku: danmaku)
+        // Hide until async rendering completes to prevent flash on appear
+        #if os(macOS)
+        danmaku.layer?.opacity = 0
+        #else
+        danmaku.layer.opacity = 0
+        #endif
         addAnimation(to: danmaku)
     }
     
@@ -423,10 +428,10 @@ class DanmakuVerticalTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         let originX = (view!.bounds.width - danmaku.bounds.width) / 2.0
         let originY = positionY - danmaku.bounds.height / 2.0
         danmaku.frame = CGRect(x: originX, y: originY, width: danmaku.bounds.width, height: danmaku.bounds.height)
-        danmaku.layer?.opacity = 1
+        danmaku.layer?.opacity = 0
         #else
         danmaku.layer.position = CGPoint(x: view!.bounds.width / 2.0, y: positionY)
-        danmaku.layer.opacity = 1
+        danmaku.layer.opacity = 0
         #endif
     }
     
