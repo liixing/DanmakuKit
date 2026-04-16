@@ -112,6 +112,7 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
     func canShoot(danmaku: DanmakuCellModel) -> Bool {
         guard !isOverlap else { return true }
         //初中数学的追击问题
+        evictStaleCells()
         guard let cell = cells.last else { return true }
         guard let cellModel = cell.model else { return true }
         
@@ -240,6 +241,30 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
     
     func clean() {
         stop()
+    }
+
+    /// Remove cells whose floating animation was stripped externally
+    /// (e.g. app backgrounded, system memory pressure) so they don't
+    /// permanently block the track.
+    private func evictStaleCells() {
+        #if os(macOS)
+        let hasAnim: (DanmakuCell) -> Bool = { $0.layer?.animation(forKey: FLOATING_ANIMATION_KEY) != nil }
+        #else
+        let hasAnim: (DanmakuCell) -> Bool = { $0.layer.animation(forKey: FLOATING_ANIMATION_KEY) != nil }
+        #endif
+        cells.removeAll { cell in
+            guard !hasAnim(cell) else { return false }
+            #if os(macOS)
+            cell.layer?.removeAllAnimations()
+            cell.layer?.opacity = 0
+            #else
+            cell.layer.removeAllAnimations()
+            cell.frame.origin.x = MAX_FLOAT_X
+            #endif
+            cell.leaveTrack()
+            stopClosure?(cell)
+            return true
+        }
     }
     
     func animationDidStop(_ anim: CAAnimation, finished flag: Bool) {
