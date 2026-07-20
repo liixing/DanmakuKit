@@ -516,7 +516,8 @@ class DanmakuVerticalTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         animation.beginTime = CACurrentMediaTime() + cellModel.displayTime * rate / Double(playingSpeed)
         animation.duration = 0
         animation.delegate = self
-        animation.fromValue = 1
+        // Omit fromValue so fade-out starts from the cell's current opacity
+        // (e.g. user-adjusted alpha). Hardcoding 1 flashes full opacity first.
         animation.toValue = 0
         animation.isRemovedOnCompletion = false
         animation.fillMode = .forwards
