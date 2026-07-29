@@ -172,22 +172,8 @@ public class DanmakuView: PlatformView {
             assert(newValue > 0, "Danmaku playing speed must be over 0.")
         }
         didSet {
-            // Apply iOS behavior on all platforms: pause -> update -> short delay -> play
-            // This ensures existing on-screen danmaku recompute durations with the new speed.
-            update {
-                for i in 0..<floatingTracks.count {
-                    var track = floatingTracks[i]
-                    track.playingSpeed = playingSpeed
-                }
-                for i in 0..<topTracks.count {
-                    var track = topTracks[i]
-                    track.playingSpeed = playingSpeed
-                }
-                for i in 0..<bottomTracks.count {
-                    var track = bottomTracks[i]
-                    track.playingSpeed = playingSpeed
-                }
-            }
+            guard oldValue != playingSpeed else { return }
+            schedulePlayingSpeedUpdate()
         }
     }
     
@@ -198,6 +184,10 @@ public class DanmakuView: PlatformView {
     private var topTracks: [DanmakuTrack] = []
     
     private var bottomTracks: [DanmakuTrack] = []
+
+    private var appliedPlayingSpeed: Float = 1.0
+
+    private var isPlayingSpeedUpdateScheduled = false
     
     private var viewHeight: CGFloat {
         return bounds.height * displayArea
@@ -265,6 +255,7 @@ public class DanmakuView: PlatformView {
 public extension DanmakuView {
     
     func shoot(danmaku: DanmakuCellModel) {
+        applyPendingPlayingSpeed()
         guard status == .play else { return }
         switch danmaku.type {
         case .floating:
@@ -345,6 +336,7 @@ public extension DanmakuView {
     
     
     func play() {
+        applyPendingPlayingSpeed()
         guard status != .play else { return }
         floatingTracks.forEach {
             $0.play()
@@ -388,6 +380,7 @@ public extension DanmakuView {
     
     @discardableResult
     func play(_ danmaku: DanmakuCellModel) -> Bool {
+        applyPendingPlayingSpeed()
         var track = floatingTracks.first { (t) -> Bool in
             return t.play(danmaku)
         }
@@ -427,6 +420,7 @@ public extension DanmakuView {
     ///   - danmaku: danmakuCellModel
     ///   - progress: progress of danmaku display
     func sync(danmaku: DanmakuCellModel, at progress: Float) {
+        applyPendingPlayingSpeed()
         guard status != .stop else { return }
         assert(progress <= 1.0, "Cannot sync danmaku at progress \(progress).")
         switch danmaku.type {
@@ -488,16 +482,45 @@ public extension DanmakuView {
     /// E.g.This method will be used when you change the displayTime property in the cellModel.
     /// - Parameter closure: update closure
     func update(_ closure: () -> Void) {
-        pause()
+        let wasPlaying = status == .play
+        if wasPlaying {
+            pause()
+        }
         closure()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
-            self.play()
+        if wasPlaying {
+            play()
         }
     }
     
 }
 
 private extension DanmakuView {
+
+    func schedulePlayingSpeedUpdate() {
+        guard !isPlayingSpeedUpdateScheduled else { return }
+        isPlayingSpeedUpdateScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            self?.applyPendingPlayingSpeed()
+        }
+    }
+
+    func applyPendingPlayingSpeed() {
+        isPlayingSpeedUpdateScheduled = false
+        guard appliedPlayingSpeed != playingSpeed else { return }
+
+        let newPlayingSpeed = playingSpeed
+        let isPlaying = status == .play
+        floatingTracks.forEach {
+            $0.updatePlayingSpeed(newPlayingSpeed, isPlaying: isPlaying)
+        }
+        topTracks.forEach {
+            $0.updatePlayingSpeed(newPlayingSpeed, isPlaying: isPlaying)
+        }
+        bottomTracks.forEach {
+            $0.updatePlayingSpeed(newPlayingSpeed, isPlaying: isPlaying)
+        }
+        appliedPlayingSpeed = newPlayingSpeed
+    }
     
     func recalculateFloatingTracks() {
         let trackCount = max(0, Int(floorf(Float((viewHeight - paddingTop - paddingBottom) / trackHeight))))
@@ -520,7 +543,7 @@ private extension DanmakuView {
                 strongSelf.cellPlayingStop(cell)
             }
             track.index = UInt(i)
-            track.playingSpeed = playingSpeed
+            track.playingSpeed = appliedPlayingSpeed
             track.positionY = CGFloat(i) * trackHeight + trackHeight / 2.0 + paddingTop + offsetY
         }
     }
@@ -546,7 +569,7 @@ private extension DanmakuView {
                 strongSelf.cellPlayingStop(cell)
             }
             track.index = UInt(i)
-            track.playingSpeed = playingSpeed
+            track.playingSpeed = appliedPlayingSpeed
             track.positionY = CGFloat(i) * trackHeight + trackHeight / 2.0 + paddingTop + offsetY
         }
     }
@@ -573,7 +596,7 @@ private extension DanmakuView {
             }
             let index = bottomTracks.count - i - 1
             track.index = UInt(index)
-            track.playingSpeed = playingSpeed
+            track.playingSpeed = appliedPlayingSpeed
             #if os(macOS)
             track.positionY = bounds.height - CGFloat(index) * trackHeight - trackHeight / 2.0 - paddingBottom - offsetY
             #else

@@ -16,8 +16,11 @@ open class DanmakuCell: PlatformView {
     public var model: DanmakuCellModel?
     
     public internal(set) var animationTime: TimeInterval = 0
-    
-    var animationBeginTime: TimeInterval = 0
+
+    /// Identifies the only animation callback that is allowed to mutate this
+    /// cell. Removing or replacing an animation always advances the generation
+    /// before Core Animation can deliver its completion callback.
+    var animationGeneration: UInt64 = 0
 
     #if canImport(UIKit)
     public override class var layerClass: AnyClass {
