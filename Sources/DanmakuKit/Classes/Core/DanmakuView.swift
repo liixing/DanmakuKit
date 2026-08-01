@@ -753,9 +753,10 @@ private extension DanmakuView {
     
     func cellPlayingStop(_ cell: DanmakuCell) {
         delegate?.danmakuView(self, didEndDisplaying: cell)
-        cell.removeFromSuperview()
         if enableCellReusable {
             self.appendCellToPool(cell)
+        } else {
+            cell.removeFromSuperview()
         }
     }
     

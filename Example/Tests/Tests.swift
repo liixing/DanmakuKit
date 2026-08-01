@@ -255,6 +255,153 @@ final class PlaybackRateRetimingTests: XCTestCase {
         )
     }
 
+    func testRapidRateChangesNeverAllowFloatingCellsToOverlap() {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let danmakuView = DanmakuView(frame: window.bounds)
+        window.addSubview(danmakuView)
+        window.isHidden = false
+        danmakuView.trackHeight = 30
+        danmakuView.enableCellReusable = true
+        danmakuView.play()
+
+        for tick in 0..<300 {
+            if tick < 100 {
+                danmakuView.playingSpeed = 1 + Float(tick % 40) * 0.1
+            } else if tick == 100 {
+                danmakuView.playingSpeed = 1
+            }
+
+            let models = (0..<8).map { item in
+                TestDanmakuModel(
+                    identifier: "collision-\(tick)-\(item)",
+                    type: .floating,
+                    size: CGSize(width: 20 + (tick * 17 + item * 31) % 180, height: 20),
+                    displayTime: 0.4
+                )
+            }
+            models.forEach(danmakuView.shoot(danmaku:))
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+
+            let activeCells = danmakuView.subviews.compactMap { view -> TestDanmakuCell? in
+                guard let cell = view as? TestDanmakuCell,
+                      cell.layer.animation(forKey: FLOATING_ANIMATION_KEY) != nil else {
+                    return nil
+                }
+                return cell
+            }
+            let visibleFrames = activeCells.map { cell -> (TestDanmakuCell, CGRect) in
+                (cell, cell.realFrame)
+            }
+
+            for leftIndex in visibleFrames.indices {
+                for rightIndex in visibleFrames.index(after: leftIndex)..<visibleFrames.endIndex {
+                    let left = visibleFrames[leftIndex]
+                    let right = visibleFrames[rightIndex]
+                    let visibleOverlap = left.1
+                        .intersection(right.1)
+                        .intersection(danmakuView.bounds)
+                    guard visibleOverlap.width > 1, visibleOverlap.height > 1 else { continue }
+                    XCTFail(
+                        "Floating danmaku overlapped at tick \(tick), speed \(danmakuView.playingSpeed), "
+                            + "tracks \(left.0.model?.track.map(String.init) ?? "nil")/"
+                            + "\(right.0.model?.track.map(String.init) ?? "nil"): "
+                            + "\(left.0.model?.identifier ?? "nil") \(left.1) intersects "
+                            + "\(right.0.model?.identifier ?? "nil") \(right.1), "
+                            + "visible overlap \(visibleOverlap)"
+                    )
+                    return
+                }
+            }
+        }
+    }
+
+    func testNewlyReusedFloatingCellImmediatelyBlocksItsTrack() {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 30))
+        let danmakuView = DanmakuView(frame: window.bounds)
+        window.addSubview(danmakuView)
+        window.isHidden = false
+        danmakuView.trackHeight = 30
+        danmakuView.enableCellReusable = true
+        danmakuView.play()
+
+        danmakuView.shoot(
+            danmaku: TestDanmakuModel(
+                identifier: "completed",
+                type: .floating,
+                size: CGSize(width: 60, height: 20),
+                displayTime: 0.02
+            )
+        )
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        danmakuView.shoot(
+            danmaku: TestDanmakuModel(
+                identifier: "reused",
+                type: .floating,
+                size: CGSize(width: 60, height: 20),
+                displayTime: 8
+            )
+        )
+
+        XCTAssertFalse(
+            danmakuView.canShoot(
+                danmaku: TestDanmakuModel(
+                    identifier: "next",
+                    type: .floating,
+                    size: CGSize(width: 60, height: 20),
+                    displayTime: 8
+                )
+            ),
+            "A reused cell still presenting its previous offscreen position admitted another cell into the same track"
+        )
+    }
+
+    func testImmediateRateChangeDoesNotRestoreAReusedCellsPreviousPosition() throws {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 30))
+        let danmakuView = DanmakuView(frame: window.bounds)
+        window.addSubview(danmakuView)
+        window.isHidden = false
+        danmakuView.trackHeight = 30
+        danmakuView.enableCellReusable = true
+        danmakuView.play()
+
+        danmakuView.shoot(
+            danmaku: TestDanmakuModel(
+                identifier: "completed-before-retiming",
+                type: .floating,
+                size: CGSize(width: 60, height: 20),
+                displayTime: 0.02
+            )
+        )
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        danmakuView.shoot(
+            danmaku: TestDanmakuModel(
+                identifier: "reused-before-retiming",
+                type: .floating,
+                size: CGSize(width: 60, height: 20),
+                displayTime: 8
+            )
+        )
+        danmakuView.playingSpeed = 3
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.001))
+
+        let cell = try XCTUnwrap(
+            danmakuView.subviews.compactMap { $0 as? TestDanmakuCell }.first {
+                $0.model?.identifier == "reused-before-retiming"
+            }
+        )
+        let animation = try XCTUnwrap(
+            cell.layer.animation(forKey: FLOATING_ANIMATION_KEY) as? CABasicAnimation
+        )
+        let fromX = try XCTUnwrap((animation.fromValue as? NSNumber)?.doubleValue)
+        XCTAssertGreaterThan(
+            fromX,
+            300,
+            "Retiming a newly reused cell must not restore its previous generation's offscreen presentation position"
+        )
+    }
+
     func testImmediateRateChangeAfterReusingFloatingCellKeepsFiniteGeometry() throws {
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 30))
         let container = UIView(frame: window.bounds)
@@ -295,18 +442,6 @@ final class PlaybackRateRetimingTests: XCTestCase {
         XCTAssertTrue(replacement.duration.isFinite, "Non-finite reused geometry created an animation that never ends")
     }
 
-    func testCompletedReusableCellIsDetachedBeforeEnteringPool() throws {
-        let danmakuView = DanmakuView(frame: CGRect(x: 0, y: 0, width: 320, height: 30))
-        danmakuView.enableCellReusable = true
-        danmakuView.play()
-        danmakuView.shoot(danmaku: TestDanmakuModel(identifier: "pooled", type: .floating))
-
-        let cell = try XCTUnwrap(danmakuView.subviews.first as? TestDanmakuCell)
-        let animation = try XCTUnwrap(cell.layer.animation(forKey: FLOATING_ANIMATION_KEY))
-        animation.delegate?.animationDidStop?(animation, finished: true)
-
-        XCTAssertNil(cell.superview, "An inactive pooled cell must not retain stale presentation geometry")
-    }
 }
 
 private final class TestDanmakuCell: DanmakuCell {}

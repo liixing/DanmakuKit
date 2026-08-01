@@ -189,37 +189,69 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         guard !isOverlap else { return true }
         //初中数学的追击问题
         evictStaleCells()
-        guard let cell = cells.last else { return true }
+        // The newest cell is the most likely to reject a launch immediately.
+        // Checking backwards keeps the common occupied-track path effectively O(1).
+        for cell in cells.reversed() {
+            guard canShoot(danmaku, withoutCollidingWith: cell) else {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func canShoot(
+        _ danmaku: DanmakuCellModel,
+        withoutCollidingWith cell: DanmakuCell
+    ) -> Bool {
         guard let cellModel = cell.model else { return true }
-        
-        //1. 获取前一个cell剩余的运动时间
+
         let preWidth = view!.bounds.width + cell.frame.width
         let nextWidth = view!.bounds.width + danmaku.size.width
-        let preRight = max(cell.realFrame.maxX, 0)
-        // remaining time = (remaining distance / total distance) * total displayTime
+        let preRight = currentFrameMaxX(of: cell)
         let preCellTime = (preRight / preWidth) * CGFloat(cellModel.displayTime)
-        //2. 计算出路程差，减10防止刚好追上
         let distance = view!.bounds.width - preRight - 10
-        guard distance >= 0 else {
-            //路程小于0说明当前轨道有一条弹幕刚发送
-            return false
-        }
+        guard distance >= 0 else { return false }
+
         let preV = preWidth / CGFloat(cellModel.displayTime)
         let nextV = nextWidth / CGFloat(danmaku.displayTime)
-        //3. 计算出速度差
-        if nextV - preV <= 0 {
-            //速度差小于等于0说明永远也追不上
-            return true
+        guard nextV > preV else { return true }
+
+        let catchUpTime = distance / (nextV - preV)
+        return catchUpTime >= preCellTime
+    }
+
+    private func currentFrameMaxX(of cell: DanmakuCell) -> CGFloat {
+        if let positionX = currentAnimatedPositionX(of: cell) {
+            return max(positionX + cell.bounds.width / 2.0, 0)
         }
-        //4. 计算出追击时间
-        let time = (distance / (nextV - preV))
-        
-        if time < preCellTime {
-            //弹幕会追击到前一个
-            return false
+        let presentedMaxX = cell.realFrame.maxX
+        return presentedMaxX.isFinite ? max(presentedMaxX, 0) : 0
+    }
+
+    /// A reused layer can briefly expose the previous animation's presentation
+    /// position. Derive the current generation's position from its animation.
+    private func currentAnimatedPositionX(of cell: DanmakuCell) -> CGFloat? {
+        guard let animation = animation(for: cell, key: FLOATING_ANIMATION_KEY) as? CABasicAnimation,
+              let fromX = (animation.fromValue as? NSNumber)?.doubleValue,
+              let toX = (animation.toValue as? NSNumber)?.doubleValue,
+              fromX.isFinite,
+              toX.isFinite else {
+            return nil
         }
-        
-        return true
+
+        #if os(macOS)
+        let currentTime = cell.layer?.convertTime(CACurrentMediaTime(), from: nil) ?? CACurrentMediaTime()
+        #else
+        let currentTime = cell.layer.convertTime(CACurrentMediaTime(), from: nil)
+        #endif
+        let progress: Double
+        if animation.duration > 0, animation.duration.isFinite {
+            progress = min(max((currentTime - animation.beginTime) / animation.duration, 0), 1)
+        } else {
+            progress = 1
+        }
+        let positionX = fromX + (toX - fromX) * progress
+        return positionX.isFinite ? CGFloat(positionX) : nil
     }
     
     func play() {
@@ -379,6 +411,8 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         let animation = CABasicAnimation(keyPath: "position.x")
         animation.beginTime = configureAnimation(animation, for: danmaku, playingSpeed: playingSpeed)
         animation.duration = (cellModel.displayTime * Double(rate)) / Double(playingSpeed)
+        // Collision prediction and retiming both assume constant velocity.
+        animation.timingFunction = CAMediaTimingFunction(name: .linear)
         animation.delegate = self
         #if os(macOS)
         animation.fromValue = NSNumber(value: Float(danmaku.layer?.position.x ?? danmaku.frame.midX))
@@ -396,13 +430,15 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
     }
 
     private func freezeAnimation(on danmaku: DanmakuCell) {
+        let animatedPositionX = currentAnimatedPositionX(of: danmaku)
         let realFrame = danmaku.realFrame
         #if os(macOS)
         let modelMidX = danmaku.frame.midX
         let fallbackMidX = (view?.bounds.width ?? 0) + danmaku.bounds.width / 2.0
-        let midX = realFrame.midX.isFinite
-            ? realFrame.midX
-            : (modelMidX.isFinite ? modelMidX : fallbackMidX)
+        let midX = animatedPositionX
+            ?? (realFrame.midX.isFinite
+                ? realFrame.midX
+                : (modelMidX.isFinite ? modelMidX : fallbackMidX))
         danmaku.frame.origin = CGPoint(
             x: midX - danmaku.bounds.width / 2.0,
             y: positionY - danmaku.bounds.height / 2.0
@@ -410,9 +446,10 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         #else
         let modelX = danmaku.layer.position.x
         let fallbackX = (view?.bounds.width ?? 0) + danmaku.bounds.width / 2.0
-        let positionX = realFrame.midX.isFinite
-            ? realFrame.midX
-            : (modelX.isFinite ? modelX : fallbackX)
+        let positionX = animatedPositionX
+            ?? (realFrame.midX.isFinite
+                ? realFrame.midX
+                : (modelX.isFinite ? modelX : fallbackX))
         danmaku.layer.position = CGPoint(x: positionX, y: positionY)
         #endif
         invalidateAnimation(for: danmaku, key: FLOATING_ANIMATION_KEY)
