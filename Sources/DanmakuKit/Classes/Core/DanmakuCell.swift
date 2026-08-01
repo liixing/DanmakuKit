@@ -8,6 +8,7 @@
 
 import Foundation
 import CoreGraphics
+import QuartzCore
 // Use shared platform typealiases
 // (see PlatformTypes.swift)
 

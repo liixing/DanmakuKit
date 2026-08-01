@@ -135,6 +135,178 @@ final class PlaybackRateRetimingTests: XCTestCase {
             XCTAssertEqual(appliedSpeed, 2)
         }
     }
+
+    func testFloatingSpeedRetimingKeepsTheTrackPositionAfterLayoutChange() {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let container = UIView(frame: window.bounds)
+        window.addSubview(container)
+        window.isHidden = false
+
+        let track = DanmakuFloatingTrack(view: container)
+        track.positionY = 15
+        let cell = TestDanmakuCell(frame: CGRect(x: 0, y: 0, width: 100, height: 30))
+        cell.model = TestDanmakuModel(identifier: "layout-retime", type: .floating)
+        container.addSubview(cell)
+        track.shoot(danmaku: cell)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+
+        track.positionY = 75
+        track.updatePlayingSpeed(2, isPlaying: true)
+
+        XCTAssertEqual(
+            cell.layer.position.y,
+            75,
+            accuracy: 0.001,
+            "Speed retiming must not restore the stale presentation-layer row"
+        )
+    }
+
+    func testExpandingThenShrinkingDisplayAreaKeepsEveryFloatingTrackUsable() {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let danmakuView = DanmakuView(frame: window.bounds)
+        window.addSubview(danmakuView)
+        window.isHidden = false
+        danmakuView.trackHeight = 30
+        danmakuView.displayArea = 0.5
+        danmakuView.enableCellReusable = true
+        danmakuView.play()
+
+        var tracksUsedAfterResize = Set<UInt>()
+        for tick in 0..<220 {
+            if (20..<70).contains(tick) {
+                danmakuView.update {
+                    danmakuView.displayArea = 0.5 + CGFloat(tick - 19) * 0.01
+                }
+            } else if (70..<120).contains(tick) {
+                danmakuView.update {
+                    danmakuView.displayArea = 1 - CGFloat(tick - 69) * 0.01
+                }
+            }
+
+            let models = (0..<6).map { item in
+                TestDanmakuModel(
+                    identifier: "display-area-\(tick)-\(item)",
+                    type: .floating,
+                    size: CGSize(width: 20 + (tick * 13 + item * 29) % 160, height: 20),
+                    displayTime: 0.35
+                )
+            }
+            models.forEach(danmakuView.shoot(danmaku:))
+            if tick >= 160 {
+                tracksUsedAfterResize.formUnion(models.compactMap(\.track))
+            }
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+        }
+
+        XCTAssertEqual(
+            tracksUsedAfterResize,
+            Set([0, 1]),
+            "Restoring the original display area permanently lost a floating track"
+        )
+    }
+
+    func testLongPressRateChangesDoNotStarveAnyFloatingTrack() {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 120))
+        let danmakuView = DanmakuView(frame: window.bounds)
+        window.addSubview(danmakuView)
+        window.isHidden = false
+        danmakuView.trackHeight = 30
+        danmakuView.enableCellReusable = true
+        danmakuView.play()
+
+        var tracksUsedAfterLongPress = Set<UInt>()
+        for tick in 0..<300 {
+            if tick < 100 {
+                danmakuView.playingSpeed = 1 + Float(tick % 40) * 0.1
+            } else if tick == 100 {
+                danmakuView.playingSpeed = 1
+            }
+
+            let models = (0..<8).map { item in
+                TestDanmakuModel(
+                    identifier: "long-press-\(tick)-\(item)",
+                    type: .floating,
+                    size: CGSize(width: 20 + (tick * 17 + item * 31) % 180, height: 20),
+                    displayTime: 0.4
+                )
+            }
+            models.forEach(danmakuView.shoot(danmaku:))
+            if tick >= 180 {
+                tracksUsedAfterLongPress.formUnion(models.compactMap(\.track))
+            }
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+        }
+
+        let liveCellDiagnostics = danmakuView.subviews.compactMap { view -> String? in
+            guard let cell = view as? TestDanmakuCell,
+                  let animation = cell.layer.animation(forKey: FLOATING_ANIMATION_KEY) else {
+                return nil
+            }
+            return "track=\(cell.model?.track.map(String.init) ?? "nil") "
+                + "frameX=\(cell.frame.origin.x) realX=\(cell.realFrame.origin.x) "
+                + "duration=\(animation.duration) begin=\(animation.beginTime) "
+                + "generation=\(cell.animationGeneration)"
+        }
+        XCTAssertEqual(
+            tracksUsedAfterLongPress,
+            Set([0, 1, 2, 3]),
+            "A floating track stayed unavailable after long-press playback-rate changes ended. "
+                + liveCellDiagnostics.joined(separator: " | ")
+        )
+    }
+
+    func testImmediateRateChangeAfterReusingFloatingCellKeepsFiniteGeometry() throws {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 30))
+        let container = UIView(frame: window.bounds)
+        window.addSubview(container)
+        window.isHidden = false
+
+        let track = DanmakuFloatingTrack(view: container)
+        track.positionY = 15
+        let cell = TestDanmakuCell(frame: CGRect(x: 320, y: 0, width: 20, height: 20))
+        cell.model = TestDanmakuModel(
+            identifier: "first-generation",
+            type: .floating,
+            size: cell.bounds.size,
+            displayTime: 8
+        )
+        container.addSubview(cell)
+        track.shoot(danmaku: cell)
+
+        let completedAnimation = try XCTUnwrap(cell.layer.animation(forKey: FLOATING_ANIMATION_KEY))
+        track.animationDidStop(completedAnimation, finished: true)
+        XCTAssertTrue(
+            cell.layer.position.x.isFinite,
+            "Completed reusable cells must not poison their presentation layer with infinite geometry"
+        )
+
+        cell.frame = CGRect(x: 320, y: 0, width: 20, height: 20)
+        cell.model = TestDanmakuModel(
+            identifier: "reused-generation",
+            type: .floating,
+            size: cell.bounds.size,
+            displayTime: 8
+        )
+        track.shoot(danmaku: cell)
+        track.updatePlayingSpeed(3, isPlaying: true)
+
+        let replacement = try XCTUnwrap(cell.layer.animation(forKey: FLOATING_ANIMATION_KEY))
+        XCTAssertTrue(cell.layer.position.x.isFinite, "Retiming restored non-finite geometry from the pooled cell")
+        XCTAssertTrue(replacement.duration.isFinite, "Non-finite reused geometry created an animation that never ends")
+    }
+
+    func testCompletedReusableCellIsDetachedBeforeEnteringPool() throws {
+        let danmakuView = DanmakuView(frame: CGRect(x: 0, y: 0, width: 320, height: 30))
+        danmakuView.enableCellReusable = true
+        danmakuView.play()
+        danmakuView.shoot(danmaku: TestDanmakuModel(identifier: "pooled", type: .floating))
+
+        let cell = try XCTUnwrap(danmakuView.subviews.first as? TestDanmakuCell)
+        let animation = try XCTUnwrap(cell.layer.animation(forKey: FLOATING_ANIMATION_KEY))
+        animation.delegate?.animationDidStop?(animation, finished: true)
+
+        XCTAssertNil(cell.superview, "An inactive pooled cell must not retain stale presentation geometry")
+    }
 }
 
 private final class TestDanmakuCell: DanmakuCell {}
@@ -142,15 +314,22 @@ private final class TestDanmakuCell: DanmakuCell {}
 private final class TestDanmakuModel: DanmakuCellModel {
 
     let cellClass: DanmakuCell.Type = TestDanmakuCell.self
-    let size = CGSize(width: 100, height: 30)
+    let size: CGSize
     var track: UInt?
-    let displayTime: Double = 60
+    let displayTime: Double
     let type: DanmakuCellType
     let identifier: String
 
-    init(identifier: String, type: DanmakuCellType) {
+    init(
+        identifier: String,
+        type: DanmakuCellType,
+        size: CGSize = CGSize(width: 100, height: 30),
+        displayTime: Double = 60
+    ) {
         self.identifier = identifier
         self.type = type
+        self.size = size
+        self.displayTime = displayTime
     }
 
     func isEqual(to cellModel: DanmakuCellModel) -> Bool {

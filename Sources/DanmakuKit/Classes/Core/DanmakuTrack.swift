@@ -12,8 +12,6 @@ import AppKit
 import UIKit
 #endif
 
-let MAX_FLOAT_X = CGFloat.infinity / 2.0
-
 //MARK: DanmakuTrack
 
 protocol DanmakuTrack {
@@ -335,7 +333,7 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
             cell.layer?.opacity = 0
             #else
             cell.layer.removeAllAnimations()
-            cell.frame.origin.x = MAX_FLOAT_X
+            cell.layer.position.x = -cell.bounds.width / 2.0
             #endif
             cell.leaveTrack()
             stopClosure?(cell)
@@ -368,7 +366,7 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
             stopClosure?(cell)
             #else
             cell.layer.removeAllAnimations()
-            cell.frame.origin.x = MAX_FLOAT_X
+            cell.layer.position.x = -cell.bounds.width / 2.0
             cell.leaveTrack()
             stopClosure?(cell)
             #endif
@@ -399,10 +397,24 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
 
     private func freezeAnimation(on danmaku: DanmakuCell) {
         let realFrame = danmaku.realFrame
+        #if os(macOS)
+        let modelMidX = danmaku.frame.midX
+        let fallbackMidX = (view?.bounds.width ?? 0) + danmaku.bounds.width / 2.0
+        let midX = realFrame.midX.isFinite
+            ? realFrame.midX
+            : (modelMidX.isFinite ? modelMidX : fallbackMidX)
         danmaku.frame.origin = CGPoint(
-            x: realFrame.midX - danmaku.bounds.width / 2.0,
-            y: realFrame.midY - danmaku.bounds.height / 2.0
+            x: midX - danmaku.bounds.width / 2.0,
+            y: positionY - danmaku.bounds.height / 2.0
         )
+        #else
+        let modelX = danmaku.layer.position.x
+        let fallbackX = (view?.bounds.width ?? 0) + danmaku.bounds.width / 2.0
+        let positionX = realFrame.midX.isFinite
+            ? realFrame.midX
+            : (modelX.isFinite ? modelX : fallbackX)
+        danmaku.layer.position = CGPoint(x: positionX, y: positionY)
+        #endif
         invalidateAnimation(for: danmaku, key: FLOATING_ANIMATION_KEY)
     }
     
@@ -594,7 +606,7 @@ class DanmakuVerticalTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
             stopClosure?(cell)
             #else
             danmaku.layer.removeAllAnimations()
-            danmaku.frame.origin.x = MAX_FLOAT_X
+            danmaku.layer.opacity = 0
             stopClosure?(cell)
             #endif
         }
