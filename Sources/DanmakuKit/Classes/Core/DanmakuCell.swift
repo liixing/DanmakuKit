@@ -42,6 +42,23 @@ open class DanmakuCell: PlatformView {
         super.init(frame: frame)
         #if os(macOS)
         self.wantsLayer = true
+        // Match UIView: center anchor so position.x animations match iOS.
+        // Disable implicit actions so AppKit doesn't fight CABasicAnimation.
+        if let layer = self.layer {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+            layer.position = CGPoint(x: frame.midX, y: frame.midY)
+            layer.actions = [
+                "position": NSNull(),
+                "bounds": NSNull(),
+                "frame": NSNull(),
+                "contents": NSNull(),
+                "opacity": NSNull(),
+                "transform": NSNull(),
+            ]
+            CATransaction.commit()
+        }
         #endif
         setupLayer()
     }

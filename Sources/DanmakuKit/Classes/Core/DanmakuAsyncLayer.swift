@@ -109,23 +109,23 @@ public class DanmakuAsyncLayer: CALayer {
             queue.async {
                 guard !isCancelled() else { return }
                 #if os(macOS)
-                let colorSpace = CGColorSpaceCreateDeviceRGB()
-                let alphaInfo: CGImageAlphaInfo = opaque ? .noneSkipLast : .premultipliedLast
-                guard let context = CGContext(data: nil, width: Int(size.width * scale), height: Int(size.height * scale), bitsPerComponent: 8, bytesPerRow: 0, space: colorSpace, bitmapInfo: alphaInfo.rawValue) else {
+                guard let cgImage = Self.renderMacDanmakuImage(
+                    size: size,
+                    scale: scale,
+                    opaque: opaque,
+                    backgroundColor: backgroundColor,
+                    isCancelled: isCancelled,
+                    displaying: self.displaying
+                ) else {
                     return
                 }
-                context.scaleBy(x: scale, y: scale)
-                if opaque {
-                    context.saveGState()
-                    if backgroundColor == nil || (backgroundColor?.alpha ?? 0) < 1 {
-                        context.setFillColor(NSColor.white.cgColor)
-                        context.fill(CGRect(origin: .zero, size: size))
-                    }
-                    if let bg = backgroundColor {
-                        context.setFillColor(bg)
-                        context.fill(CGRect(origin: .zero, size: size))
-                    }
-                    context.restoreGState()
+                if isCancelled() {
+                    DispatchQueue.main.async { self.didDisplay?(self, false) }
+                    return
+                }
+                DispatchQueue.main.async {
+                    if isCancelled() { self.didDisplay?(self, false) }
+                    else { self.contents = cgImage; self.didDisplay?(self, true) }
                 }
                 #else
                 UIGraphicsBeginImageContextWithOptions(size, opaque, scale)
@@ -147,30 +147,14 @@ public class DanmakuAsyncLayer: CALayer {
                     }
                     context.restoreGState()
                 }
-                #endif
                 self.displaying?(context, size, isCancelled)
                 if isCancelled() {
-                    #if os(macOS)
-                    // no UIGraphics context to end on macOS
-                    #else
                     UIGraphicsEndImageContext()
-                    #endif
                     DispatchQueue.main.async {
                         self.didDisplay?(self, false)
                     }
                     return
                 }
-                #if os(macOS)
-                let cgImage = context.makeImage()
-                if isCancelled() {
-                    DispatchQueue.main.async { self.didDisplay?(self, false) }
-                    return
-                }
-                DispatchQueue.main.async {
-                    if isCancelled() { self.didDisplay?(self, false) }
-                    else { self.contents = cgImage; self.didDisplay?(self, true) }
-                }
-                #else
                 let image = UIGraphicsGetImageFromCurrentImageContext()
                 UIGraphicsEndImageContext()
                 if isCancelled() {
@@ -197,34 +181,20 @@ public class DanmakuAsyncLayer: CALayer {
             let size = bounds.size
             let scale = contentsScale
             let opaque = isOpaque
-            let colorSpace = CGColorSpaceCreateDeviceRGB()
-            let alphaInfo: CGImageAlphaInfo = opaque ? .noneSkipLast : .premultipliedLast
-            guard let context = CGContext(data: nil,
-                                          width: Int(size.width * scale),
-                                          height: Int(size.height * scale),
-                                          bitsPerComponent: 8,
-                                          bytesPerRow: 0,
-                                          space: colorSpace,
-                                          bitmapInfo: alphaInfo.rawValue) else {
-                return
+            if let image = Self.renderMacDanmakuImage(
+                size: size,
+                scale: scale,
+                opaque: opaque,
+                backgroundColor: (opaque && self.backgroundColor != nil) ? self.backgroundColor : nil,
+                isCancelled: { false },
+                displaying: displaying
+            ) {
+                contents = image
+                didDisplay?(self, true)
+            } else {
+                contents = nil
+                didDisplay?(self, false)
             }
-            context.scaleBy(x: scale, y: scale)
-            if opaque {
-                context.saveGState()
-                if self.backgroundColor == nil || (self.backgroundColor?.alpha ?? 0) < 1 {
-                    context.setFillColor(NSColor.white.cgColor)
-                    context.fill(CGRect(origin: .zero, size: size))
-                }
-                if let bg = self.backgroundColor {
-                    context.setFillColor(bg)
-                    context.fill(CGRect(origin: .zero, size: size))
-                }
-                context.restoreGState()
-            }
-            displaying?(context, bounds.size, {() -> Bool in return false})
-            let image = context.makeImage()
-            contents = image
-            didDisplay?(self, true)
             #else
             UIGraphicsBeginImageContextWithOptions(bounds.size, isOpaque, contentsScale)
             guard let context = UIGraphicsGetCurrentContext() else {
@@ -239,6 +209,55 @@ public class DanmakuAsyncLayer: CALayer {
             #endif
         }
     }
+
+    #if os(macOS)
+    /// Single-pass CG bitmap for `CALayer.contents`.
+    ///
+    /// Uses **default CG coordinates** (origin bottom-left, y up) and expects
+    /// the cell to draw with Core Text at a baseline `y` — no NSGraphicsContext
+    /// flip stack (that was the inverted-glyph bug).
+    private static func renderMacDanmakuImage(
+        size: CGSize,
+        scale: CGFloat,
+        opaque: Bool,
+        backgroundColor: CGColor?,
+        isCancelled: () -> Bool,
+        displaying: ((_ context: CGContext, _ size: CGSize, _ isCancelled: () -> Bool) -> Void)?
+    ) -> CGImage? {
+        let pixelW = max(1, Int(ceil(size.width * scale)))
+        let pixelH = max(1, Int(ceil(size.height * scale)))
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let alphaInfo: CGImageAlphaInfo = opaque ? .noneSkipLast : .premultipliedLast
+        guard let context = CGContext(
+            data: nil,
+            width: pixelW,
+            height: pixelH,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: alphaInfo.rawValue
+        ) else {
+            return nil
+        }
+        // Point space, origin bottom-left (standard CG / CALayer.contents).
+        context.scaleBy(x: scale, y: scale)
+        if opaque {
+            context.saveGState()
+            if backgroundColor == nil || (backgroundColor?.alpha ?? 0) < 1 {
+                context.setFillColor(NSColor.white.cgColor)
+                context.fill(CGRect(origin: .zero, size: size))
+            }
+            if let bg = backgroundColor {
+                context.setFillColor(bg)
+                context.fill(CGRect(origin: .zero, size: size))
+            }
+            context.restoreGState()
+        }
+        displaying?(context, size, isCancelled)
+        guard !isCancelled() else { return nil }
+        return context.makeImage()
+    }
+    #endif
     
     private static func createPoolIfNeed() {
         guard DanmakuAsyncLayer.pool == nil else { return }

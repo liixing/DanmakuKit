@@ -689,10 +689,10 @@ private extension DanmakuView {
         
         let frame = CGRect(x: bounds.width, y: 0, width: danmaku.size.width, height: danmaku.size.height)
         if cell == nil {
-            guard let cls = NSClassFromString(NSStringFromClass(danmaku.cellClass)) as? DanmakuCell.Type else {
-                assert(false, "Launched Danmaku must inherit from DanmakuCell!")
-                return nil
-            }
+            // Prefer the metatype directly. NSClassFromString(NSStringFromClass(...))
+            // fails for pure-Swift subclasses in some app modules (macOS Release
+            // especially) — shoot then silently returns nil and nothing appears.
+            let cls = danmaku.cellClass
             cell = cls.init(frame: frame)
             cell?.model = danmaku
             #if os(macOS)

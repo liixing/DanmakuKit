@@ -175,7 +175,22 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
     func shoot(danmaku: DanmakuCell) {
         cells.append(danmaku)
         #if os(macOS)
-        danmaku.frame = CGRect(x: view!.bounds.width, y: positionY - danmaku.bounds.height / 2.0, width: danmaku.bounds.width, height: danmaku.bounds.height)
+        // Place with frame (flipped view coords), then center the layer like UIView.
+        // Scroll uses transform.translation.x so AppKit frame layout won't fight CA.
+        let w = max(danmaku.bounds.width, 1)
+        let h = max(danmaku.bounds.height, 1)
+        let viewW = view!.bounds.width
+        let originX = viewW
+        let originY = positionY - h / 2.0
+        danmaku.frame = CGRect(x: originX, y: originY, width: w, height: h)
+        if let layer = danmaku.layer {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+            layer.position = CGPoint(x: originX + w / 2.0, y: originY + h / 2.0)
+            layer.transform = CATransform3DIdentity
+            CATransaction.commit()
+        }
         #else
         danmaku.layer.position = CGPoint(x: view!.bounds.width + danmaku.bounds.width / 2.0, y: positionY)
         #endif
@@ -222,6 +237,7 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
 
     private func currentFrameMaxX(of cell: DanmakuCell) -> CGFloat {
         if let positionX = currentAnimatedPositionX(of: cell) {
+            // positionX is center (iOS layer.position / Mac rest+translation).
             return max(positionX + cell.bounds.width / 2.0, 0)
         }
         let presentedMaxX = cell.realFrame.maxX
@@ -250,7 +266,14 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         } else {
             progress = 1
         }
+        #if os(macOS)
+        // Animation is transform.translation.x; absolute center x = rest position + translation.
+        let restX = cell.layer?.position.x ?? cell.frame.midX
+        let translation = fromX + (toX - fromX) * progress
+        let positionX = restX + translation
+        #else
         let positionX = fromX + (toX - fromX) * progress
+        #endif
         return positionX.isFinite ? CGFloat(positionX) : nil
     }
     
@@ -407,20 +430,35 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
     
     private func addAnimation(to danmaku: DanmakuCell) {
         guard let cellModel = danmaku.model else { return }
-        let rate = max(danmaku.frame.maxX / (view!.bounds.width + danmaku.frame.width), 0)
+        let viewW = view!.bounds.width
+        let cellW = max(danmaku.bounds.width, 1)
+        // Full right→left travel (same distance as iOS center-based path).
+        let travel = viewW + cellW
+        let rate = max(CGFloat(travel) / max(viewW + cellW, 1), 0)
+        #if os(macOS)
+        // transform.translation.x: model frame stays put; GPU only translates.
+        // Avoids AppKit reconciling NSView.frame vs layer.position every tick (stutter).
+        let animation = CABasicAnimation(keyPath: "transform.translation.x")
+        animation.beginTime = configureAnimation(animation, for: danmaku, playingSpeed: playingSpeed)
+        animation.duration = (cellModel.displayTime * Double(rate)) / Double(max(playingSpeed, 0.01))
+        animation.timingFunction = CAMediaTimingFunction(name: .linear)
+        animation.delegate = self
+        animation.fromValue = 0
+        animation.toValue = -travel
+        animation.isRemovedOnCompletion = false
+        animation.fillMode = .forwards
+        if let layer = danmaku.layer {
+            // Absolute media time → layer time (smoother than raw CACurrentMediaTime assign).
+            let t = layer.convertTime(CACurrentMediaTime(), from: nil)
+            animation.beginTime = t
+            layer.add(animation, forKey: FLOATING_ANIMATION_KEY)
+        }
+        #else
         let animation = CABasicAnimation(keyPath: "position.x")
         animation.beginTime = configureAnimation(animation, for: danmaku, playingSpeed: playingSpeed)
         animation.duration = (cellModel.displayTime * Double(rate)) / Double(playingSpeed)
-        // Collision prediction and retiming both assume constant velocity.
         animation.timingFunction = CAMediaTimingFunction(name: .linear)
         animation.delegate = self
-        #if os(macOS)
-        animation.fromValue = NSNumber(value: Float(danmaku.layer?.position.x ?? danmaku.frame.midX))
-        animation.toValue = NSNumber(value: Float(-danmaku.bounds.width))
-        animation.isRemovedOnCompletion = false
-        animation.fillMode = .forwards
-        danmaku.layer?.add(animation, forKey: FLOATING_ANIMATION_KEY)
-        #else
         animation.fromValue = NSNumber(value: Float(danmaku.layer.position.x))
         animation.toValue = NSNumber(value: Float(-danmaku.bounds.width / 2.0))
         animation.isRemovedOnCompletion = false
@@ -439,10 +477,20 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
             ?? (realFrame.midX.isFinite
                 ? realFrame.midX
                 : (modelMidX.isFinite ? modelMidX : fallbackMidX))
-        danmaku.frame.origin = CGPoint(
-            x: midX - danmaku.bounds.width / 2.0,
-            y: positionY - danmaku.bounds.height / 2.0
+        let w = danmaku.bounds.width
+        let h = danmaku.bounds.height
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        // Bake translation into frame/position and clear transform.
+        danmaku.layer?.transform = CATransform3DIdentity
+        danmaku.frame = CGRect(
+            x: midX - w / 2.0,
+            y: positionY - h / 2.0,
+            width: w,
+            height: h
         )
+        danmaku.layer?.position = CGPoint(x: midX, y: positionY)
+        CATransaction.commit()
         #else
         let modelX = danmaku.layer.position.x
         let fallbackX = (view?.bounds.width ?? 0) + danmaku.bounds.width / 2.0
