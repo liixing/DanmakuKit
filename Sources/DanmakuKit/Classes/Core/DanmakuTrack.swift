@@ -62,6 +62,11 @@ let DANMAKU_CELL_KEY = "DANMAKU_CELL_KEY"
 let DANMAKU_ANIMATION_GENERATION_KEY = "DANMAKU_ANIMATION_GENERATION_KEY"
 let DANMAKU_ANIMATION_STARTED_AT_KEY = "DANMAKU_ANIMATION_STARTED_AT_KEY"
 let DANMAKU_ANIMATION_SPEED_KEY = "DANMAKU_ANIMATION_SPEED_KEY"
+/// Absolute center-X path stored on the floating animation (independent of keyPath).
+/// macOS scrolls via `transform.translation.x`; collision must not rely on
+/// reading fromValue/toValue as absolute positions (those are translations).
+let DANMAKU_FROM_CENTER_X_KEY = "DANMAKU_FROM_CENTER_X_KEY"
+let DANMAKU_TO_CENTER_X_KEY = "DANMAKU_TO_CENTER_X_KEY"
 
 private func animation(for cell: DanmakuCell, key: String) -> CAAnimation? {
     #if os(macOS)
@@ -240,34 +245,54 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
             // positionX is center (iOS layer.position / Mac rest+translation).
             return max(positionX + cell.bounds.width / 2.0, 0)
         }
+        #if os(macOS)
+        // Prefer presentation position + translation (transform.translation.x).
+        // AppKit `presentation.frame` is unreliable with view-backed layers.
+        if let presentation = cell.layer?.presentation() {
+            let centerX = presentation.position.x + presentation.transform.m41
+            if centerX.isFinite {
+                return max(centerX + cell.bounds.width / 2.0, 0)
+            }
+        }
+        // Unknown geometry: treat as just-launched at the right edge so we
+        // *block* the track. Falling back to a small maxX falsely allows
+        // overlap (the regression from transform-based scrolling).
+        let viewW = view?.bounds.width ?? 0
+        return viewW + max(cell.bounds.width, 1)
+        #else
         let presentedMaxX = cell.realFrame.maxX
         return presentedMaxX.isFinite ? max(presentedMaxX, 0) : 0
+        #endif
     }
 
     /// A reused layer can briefly expose the previous animation's presentation
     /// position. Derive the current generation's position from its animation.
     private func currentAnimatedPositionX(of cell: DanmakuCell) -> CGFloat? {
-        guard let animation = animation(for: cell, key: FLOATING_ANIMATION_KEY) as? CABasicAnimation,
-              let fromX = (animation.fromValue as? NSNumber)?.doubleValue,
-              let toX = (animation.toValue as? NSNumber)?.doubleValue,
+        guard let animation = animation(for: cell, key: FLOATING_ANIMATION_KEY) as? CABasicAnimation else {
+            return nil
+        }
+
+        let progress = floatingAnimationProgress(animation, on: cell)
+
+        // Prefer absolute center path stored when the animation was created.
+        // This stays correct for both position.x (iOS) and transform.translation.x (macOS).
+        if let fromAbs = (animation.value(forKey: DANMAKU_FROM_CENTER_X_KEY) as? NSNumber)?.doubleValue,
+           let toAbs = (animation.value(forKey: DANMAKU_TO_CENTER_X_KEY) as? NSNumber)?.doubleValue,
+           fromAbs.isFinite,
+           toAbs.isFinite {
+            let positionX = fromAbs + (toAbs - fromAbs) * progress
+            return positionX.isFinite ? CGFloat(positionX) : nil
+        }
+
+        guard let fromX = numberValue(animation.fromValue),
+              let toX = numberValue(animation.toValue),
               fromX.isFinite,
               toX.isFinite else {
             return nil
         }
 
         #if os(macOS)
-        let currentTime = cell.layer?.convertTime(CACurrentMediaTime(), from: nil) ?? CACurrentMediaTime()
-        #else
-        let currentTime = cell.layer.convertTime(CACurrentMediaTime(), from: nil)
-        #endif
-        let progress: Double
-        if animation.duration > 0, animation.duration.isFinite {
-            progress = min(max((currentTime - animation.beginTime) / animation.duration, 0), 1)
-        } else {
-            progress = 1
-        }
-        #if os(macOS)
-        // Animation is transform.translation.x; absolute center x = rest position + translation.
+        // Legacy path: from/to are translation deltas (0 → -travel).
         let restX = cell.layer?.position.x ?? cell.frame.midX
         let translation = fromX + (toX - fromX) * progress
         let positionX = restX + translation
@@ -275,6 +300,36 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         let positionX = fromX + (toX - fromX) * progress
         #endif
         return positionX.isFinite ? CGFloat(positionX) : nil
+    }
+
+    /// Progress in [0, 1] for the floating scroll animation.
+    /// Prefer wall-clock start + applied speed (stable on macOS); fall back to beginTime.
+    private func floatingAnimationProgress(_ animation: CAAnimation, on cell: DanmakuCell) -> Double {
+        let duration = animation.duration
+        guard duration > 0, duration.isFinite else { return 1 }
+
+        // Prefer wall-clock start stamped at install. `animation.duration` already
+        // accounts for playingSpeed (displayTime / speed), so progress is linear
+        // against CACurrentMediaTime — more reliable than beginTime on macOS.
+        if let startedAt = (animation.value(forKey: DANMAKU_ANIMATION_STARTED_AT_KEY) as? NSNumber)?.doubleValue {
+            return min(max((CACurrentMediaTime() - startedAt) / duration, 0), 1)
+        }
+
+        #if os(macOS)
+        let currentTime = cell.layer?.convertTime(CACurrentMediaTime(), from: nil) ?? CACurrentMediaTime()
+        #else
+        let currentTime = cell.layer.convertTime(CACurrentMediaTime(), from: nil)
+        #endif
+        return min(max((currentTime - animation.beginTime) / duration, 0), 1)
+    }
+
+    private func numberValue(_ value: Any?) -> Double? {
+        if let n = value as? NSNumber { return n.doubleValue }
+        if let d = value as? Double { return d }
+        if let f = value as? CGFloat { return Double(f) }
+        if let f = value as? Float { return Double(f) }
+        if let i = value as? Int { return Double(i) }
+        return nil
     }
     
     func play() {
@@ -435,32 +490,45 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         // Full right→left travel (same distance as iOS center-based path).
         let travel = viewW + cellW
         let rate = max(CGFloat(travel) / max(viewW + cellW, 1), 0)
+        let speed = max(playingSpeed, 0.01)
         #if os(macOS)
         // transform.translation.x: model frame stays put; GPU only translates.
         // Avoids AppKit reconciling NSView.frame vs layer.position every tick (stutter).
+        let restCenterX = danmaku.layer?.position.x
+            ?? (danmaku.frame.origin.x + cellW / 2.0)
+        let fromCenterX = restCenterX
+        let toCenterX = restCenterX - travel
         let animation = CABasicAnimation(keyPath: "transform.translation.x")
-        animation.beginTime = configureAnimation(animation, for: danmaku, playingSpeed: playingSpeed)
-        animation.duration = (cellModel.displayTime * Double(rate)) / Double(max(playingSpeed, 0.01))
+        _ = configureAnimation(animation, for: danmaku, playingSpeed: speed)
+        animation.duration = (cellModel.displayTime * Double(rate)) / Double(speed)
         animation.timingFunction = CAMediaTimingFunction(name: .linear)
         animation.delegate = self
-        animation.fromValue = 0
-        animation.toValue = -travel
+        animation.fromValue = NSNumber(value: 0)
+        animation.toValue = NSNumber(value: Double(-travel))
+        animation.setValue(NSNumber(value: Double(fromCenterX)), forKey: DANMAKU_FROM_CENTER_X_KEY)
+        animation.setValue(NSNumber(value: Double(toCenterX)), forKey: DANMAKU_TO_CENTER_X_KEY)
         animation.isRemovedOnCompletion = false
         animation.fillMode = .forwards
         if let layer = danmaku.layer {
             // Absolute media time → layer time (smoother than raw CACurrentMediaTime assign).
             let t = layer.convertTime(CACurrentMediaTime(), from: nil)
             animation.beginTime = t
+            // Re-stamp wall clock after beginTime is finalized (progress math uses this).
+            animation.setValue(NSNumber(value: CACurrentMediaTime()), forKey: DANMAKU_ANIMATION_STARTED_AT_KEY)
             layer.add(animation, forKey: FLOATING_ANIMATION_KEY)
         }
         #else
+        let fromCenterX = danmaku.layer.position.x
+        let toCenterX = -danmaku.bounds.width / 2.0
         let animation = CABasicAnimation(keyPath: "position.x")
         animation.beginTime = configureAnimation(animation, for: danmaku, playingSpeed: playingSpeed)
         animation.duration = (cellModel.displayTime * Double(rate)) / Double(playingSpeed)
         animation.timingFunction = CAMediaTimingFunction(name: .linear)
         animation.delegate = self
-        animation.fromValue = NSNumber(value: Float(danmaku.layer.position.x))
-        animation.toValue = NSNumber(value: Float(-danmaku.bounds.width / 2.0))
+        animation.fromValue = NSNumber(value: Float(fromCenterX))
+        animation.toValue = NSNumber(value: Float(toCenterX))
+        animation.setValue(NSNumber(value: Double(fromCenterX)), forKey: DANMAKU_FROM_CENTER_X_KEY)
+        animation.setValue(NSNumber(value: Double(toCenterX)), forKey: DANMAKU_TO_CENTER_X_KEY)
         animation.isRemovedOnCompletion = false
         animation.fillMode = .forwards
         danmaku.layer.add(animation, forKey: FLOATING_ANIMATION_KEY)
