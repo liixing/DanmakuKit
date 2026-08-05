@@ -171,10 +171,9 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         self.playingSpeed = playingSpeed
         #if os(macOS)
         if isPlaying {
-            cells.forEach {
-                pauseLayerClock(of: $0)
-                resumeLayerClock(of: $0, speed: playingSpeed)
-            }
+            let mediaTime = CACurrentMediaTime()
+            cells.forEach { pauseLayerClock(of: $0, at: mediaTime) }
+            cells.forEach { resumeLayerClock(of: $0, speed: playingSpeed, at: mediaTime) }
         }
         #else
         guard isPlaying else { return }
@@ -218,11 +217,17 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         guard !isOverlap else { return true }
         //初中数学的追击问题
         evictStaleCells()
-        // Only the previous (newest) cell matters: floating cells enter from the
-        // right, so older cells are further left. Checking every cell over-blocks
-        // and leaves unnaturally large gaps.
+        #if os(macOS)
+        for cell in cells.reversed() {
+            if !canShoot(danmaku, withoutCollidingWith: cell) {
+                return false
+            }
+        }
+        return true
+        #else
         guard let cell = cells.last else { return true }
         return canShoot(danmaku, withoutCollidingWith: cell)
+        #endif
     }
 
     private func canShoot(
@@ -240,10 +245,13 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         let preRight = currentFrameMaxX(of: cell)
         guard preWidth > 0, cellModel.displayTime > 0, danmaku.displayTime > 0 else { return true }
 
-        // Entrance gate: previous right edge must leave a small gap past the right
-        // border so the next cell can spawn off-screen without overlap.
-        // 4pt is enough for anti-kiss; 10pt was visually sparse under high volume.
+        // AppKit text uses stroke and shadow outside its glyph bounds, so its
+        // collision margin must also cover those visible pixels.
+        #if os(macOS)
+        let entranceGap: CGFloat = 18
+        #else
         let entranceGap: CGFloat = 4
+        #endif
         let distance = viewWidth - preRight - entranceGap
         guard distance >= 0 else { return false }
 
@@ -261,14 +269,21 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
     }
 
     private func currentFrameMaxX(of cell: DanmakuCell) -> CGFloat {
-        // Prefer on-screen pixels (presentation), then animation metadata.
-        // Time-based math alone drifts from CA and causes gap/overlap after timing changes.
-        if let centerX = presentationCenterX(of: cell) {
-            return max(centerX + cell.bounds.width / 2.0, 0)
-        }
+        #if os(macOS)
+        // AppKit presentation layers are asynchronous and can briefly report a
+        // frame ahead of the animation clock, releasing an occupied track early.
         if let positionX = currentAnimatedPositionX(of: cell) {
             return max(positionX + cell.bounds.width / 2.0, 0)
         }
+        #endif
+        if let centerX = presentationCenterX(of: cell) {
+            return max(centerX + cell.bounds.width / 2.0, 0)
+        }
+        #if !os(macOS)
+        if let positionX = currentAnimatedPositionX(of: cell) {
+            return max(positionX + cell.bounds.width / 2.0, 0)
+        }
+        #endif
         let presentedMaxX = cell.realFrame.maxX
         if presentedMaxX.isFinite {
             return max(presentedMaxX, 0)
@@ -350,6 +365,14 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
     private func floatingAnimationProgress(_ animation: CAAnimation, on cell: DanmakuCell) -> Double {
         let duration = animation.duration
         guard duration > 0, duration.isFinite else { return 1 }
+
+        #if os(macOS)
+        if animation.beginTime > 0 {
+            let layerTime = cell.layer?.convertTime(CACurrentMediaTime(), from: nil)
+                ?? CACurrentMediaTime()
+            return min(max((layerTime - animation.beginTime) / duration, 0), 1)
+        }
+        #endif
 
         // Geometric progress from live pixels — immune to beginTime/clock skew.
         if let fromAbs = (animation.value(forKey: DANMAKU_FROM_CENTER_X_KEY) as? NSNumber)?.doubleValue,
@@ -637,22 +660,28 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
     }
 
     /// Freeze presentation exactly where it is (Apple CA pause recipe).
-    private func pauseLayerClock(of cell: DanmakuCell) {
+    private func pauseLayerClock(
+        of cell: DanmakuCell,
+        at mediaTime: CFTimeInterval = CACurrentMediaTime()
+    ) {
         guard let layer = cell.layer else { return }
         if layer.speed == 0 { return }
-        let t = layer.convertTime(CACurrentMediaTime(), from: nil)
+        let t = layer.convertTime(mediaTime, from: nil)
         layer.speed = 0
         layer.timeOffset = t
     }
 
     /// Resume after `pauseLayerClock` at the requested playback rate.
-    private func resumeLayerClock(of cell: DanmakuCell, speed: Float) {
+    private func resumeLayerClock(
+        of cell: DanmakuCell,
+        speed: Float,
+        at mediaTime: CFTimeInterval = CACurrentMediaTime()
+    ) {
         guard let layer = cell.layer else { return }
         let rate = max(speed, 0.01)
         if layer.speed == 0 {
             let pausedTime = layer.timeOffset
-            let parentTime = layer.superlayer?.convertTime(CACurrentMediaTime(), from: nil)
-                ?? CACurrentMediaTime()
+            let parentTime = layer.superlayer?.convertTime(mediaTime, from: nil) ?? mediaTime
             layer.speed = rate
             layer.timeOffset = 0
             layer.beginTime = parentTime - pausedTime / Double(rate)

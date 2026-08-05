@@ -5,6 +5,44 @@ import XCTest
 @testable import DanmakuKit
 
 final class DanmakuTrackMacTests: XCTestCase {
+    func testMacTrackAcceptsFollowerAtTwentyPointGap() {
+        let window = NSWindow(
+            contentRect: CGRect(x: 0, y: 0, width: 320, height: 40),
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
+        let container = NSView(frame: CGRect(x: 0, y: 0, width: 320, height: 40))
+        container.wantsLayer = true
+        window.contentView = container
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
+        let track = DanmakuFloatingTrack(view: container)
+        track.positionY = 20
+
+        let leader = TestDanmakuCell(frame: CGRect(x: 320, y: 10, width: 80, height: 20))
+        leader.model = TestDanmakuModel(size: leader.frame.size, displayTime: 2)
+        container.addSubview(leader)
+        track.shoot(danmaku: leader)
+
+        let follower = TestDanmakuModel(
+            identifier: "follower",
+            size: leader.frame.size,
+            displayTime: 2
+        )
+        let deadline = Date(timeIntervalSinceNow: 0.5)
+        while Date() < deadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.002))
+            guard let frame = leader.layer?.presentation()?.frame else { continue }
+            let gap = container.bounds.width - frame.maxX
+            if gap >= 20, gap <= 22 {
+                XCTAssertTrue(track.canShoot(danmaku: follower), "Track overblocked at gap \(gap)")
+                return
+            }
+        }
+        XCTFail("Leader never reached the measured gap")
+    }
+
     func testRealViewNeverCollapsesTracksOrOverlapsDuringPauseAndRateChanges() {
         let window = NSWindow(
             contentRect: CGRect(x: 0, y: 0, width: 320, height: 120),
@@ -111,6 +149,17 @@ final class DanmakuTrackMacTests: XCTestCase {
                 for rightIndex in visible.index(after: leftIndex)..<visible.endIndex {
                     let left = visible[leftIndex]
                     let right = visible[rightIndex]
+                    if left.0.model?.track == right.0.model?.track {
+                        let gap = max(
+                            right.1.minX - left.1.maxX,
+                            left.1.minX - right.1.maxX
+                        )
+                        XCTAssertGreaterThanOrEqual(
+                            gap,
+                            6,
+                            "Unsafe same-track gap at tick \(tick): \(gap)"
+                        )
+                    }
                     let overlap = left.1.intersection(right.1).intersection(danmakuView.bounds)
                     guard overlap.width > 1, overlap.height > 1 else { continue }
                     XCTFail(
