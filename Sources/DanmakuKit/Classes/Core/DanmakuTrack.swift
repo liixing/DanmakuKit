@@ -63,8 +63,6 @@ let DANMAKU_ANIMATION_GENERATION_KEY = "DANMAKU_ANIMATION_GENERATION_KEY"
 let DANMAKU_ANIMATION_STARTED_AT_KEY = "DANMAKU_ANIMATION_STARTED_AT_KEY"
 let DANMAKU_ANIMATION_SPEED_KEY = "DANMAKU_ANIMATION_SPEED_KEY"
 /// Absolute center-X path stored on the floating animation (independent of keyPath).
-/// macOS scrolls via `transform.translation.x`; collision must not rely on
-/// reading fromValue/toValue as absolute positions (those are translations).
 let DANMAKU_FROM_CENTER_X_KEY = "DANMAKU_FROM_CENTER_X_KEY"
 let DANMAKU_TO_CENTER_X_KEY = "DANMAKU_TO_CENTER_X_KEY"
 
@@ -132,13 +130,19 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
     
     var positionY: CGFloat = 0 {
         didSet {
-            // Match DanmuKitMac behavior: do not mutate CALayer position on macOS while animating.
-            // iOS can adjust layer.position.y to keep centered vertically on layout changes.
-            #if !os(macOS)
-            cells.forEach {
-                $0.layer.position.y = positionY
+            guard oldValue != positionY else { return }
+            cells.forEach { cell in
+                #if os(macOS)
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                var frame = cell.frame
+                frame.origin.y = positionY - frame.height / 2.0
+                cell.frame = frame
+                CATransaction.commit()
+                #else
+                cell.layer.position.y = positionY
+                #endif
             }
-            #endif
         }
     }
     
@@ -164,38 +168,43 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
 
     func updatePlayingSpeed(_ playingSpeed: Float, isPlaying: Bool) {
         guard self.playingSpeed != playingSpeed else { return }
-        if isPlaying {
-            cells.forEach {
-                freezeAnimation(on: $0)
-            }
-        }
         self.playingSpeed = playingSpeed
+        #if os(macOS)
         if isPlaying {
             cells.forEach {
-                addAnimation(to: $0)
+                pauseLayerClock(of: $0)
+                resumeLayerClock(of: $0, speed: playingSpeed)
             }
         }
+        #else
+        guard isPlaying else { return }
+        cells.forEach {
+            freezeAnimation(on: $0)
+        }
+        cells.forEach {
+            addAnimation(to: $0)
+        }
+        #endif
     }
     
     func shoot(danmaku: DanmakuCell) {
         cells.append(danmaku)
         #if os(macOS)
-        // Place with frame (flipped view coords), then center the layer like UIView.
-        // Scroll uses transform.translation.x so AppKit frame layout won't fight CA.
+        // Rest geometry stays fixed for the whole flight; scroll is
+        // transform.translation.x (AppKit must not reconcile frame vs position).
         let w = max(danmaku.bounds.width, 1)
         let h = max(danmaku.bounds.height, 1)
         let viewW = view!.bounds.width
         let originX = viewW
         let originY = positionY - h / 2.0
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         danmaku.frame = CGRect(x: originX, y: originY, width: w, height: h)
         if let layer = danmaku.layer {
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-            layer.position = CGPoint(x: originX + w / 2.0, y: originY + h / 2.0)
             layer.transform = CATransform3DIdentity
-            CATransaction.commit()
+            resetLayerClock(layer)
         }
+        CATransaction.commit()
         #else
         danmaku.layer.position = CGPoint(x: view!.bounds.width + danmaku.bounds.width / 2.0, y: positionY)
         #endif
@@ -209,14 +218,11 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         guard !isOverlap else { return true }
         //初中数学的追击问题
         evictStaleCells()
-        // The newest cell is the most likely to reject a launch immediately.
-        // Checking backwards keeps the common occupied-track path effectively O(1).
-        for cell in cells.reversed() {
-            guard canShoot(danmaku, withoutCollidingWith: cell) else {
-                return false
-            }
-        }
-        return true
+        // Only the previous (newest) cell matters: floating cells enter from the
+        // right, so older cells are further left. Checking every cell over-blocks
+        // and leaves unnaturally large gaps.
+        guard let cell = cells.last else { return true }
+        return canShoot(danmaku, withoutCollidingWith: cell)
     }
 
     private func canShoot(
@@ -225,48 +231,94 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
     ) -> Bool {
         guard let cellModel = cell.model else { return true }
 
-        let preWidth = view!.bounds.width + cell.frame.width
-        let nextWidth = view!.bounds.width + danmaku.size.width
+        // Prefer bounds.width: frame.origin can be stale under CA while size is stable.
+        let viewWidth = view!.bounds.width
+        let preCellWidth = max(cell.bounds.width, 1)
+        let nextCellWidth = max(danmaku.size.width, 1)
+        let preWidth = viewWidth + preCellWidth
+        let nextWidth = viewWidth + nextCellWidth
         let preRight = currentFrameMaxX(of: cell)
-        let preCellTime = (preRight / preWidth) * CGFloat(cellModel.displayTime)
-        let distance = view!.bounds.width - preRight - 10
+        guard preWidth > 0, cellModel.displayTime > 0, danmaku.displayTime > 0 else { return true }
+
+        // Entrance gate: previous right edge must leave a small gap past the right
+        // border so the next cell can spawn off-screen without overlap.
+        // 4pt is enough for anti-kiss; 10pt was visually sparse under high volume.
+        let entranceGap: CGFloat = 4
+        let distance = viewWidth - preRight - entranceGap
         guard distance >= 0 else { return false }
 
+        // Same or lower speed (usually same displayTime + shorter/equal width):
+        // never catches up → allow as soon as entrance gap is free.
         let preV = preWidth / CGFloat(cellModel.displayTime)
         let nextV = nextWidth / CGFloat(danmaku.displayTime)
         guard nextV > preV else { return true }
 
+        // Faster follower (typically wider text): classical pursuit.
+        // Remaining time of leader ≈ fraction of full path still ahead of its right edge.
+        let preCellTime = (preRight / preWidth) * CGFloat(cellModel.displayTime)
         let catchUpTime = distance / (nextV - preV)
         return catchUpTime >= preCellTime
     }
 
     private func currentFrameMaxX(of cell: DanmakuCell) -> CGFloat {
+        // Prefer on-screen pixels (presentation), then animation metadata.
+        // Time-based math alone drifts from CA and causes gap/overlap after timing changes.
+        if let centerX = presentationCenterX(of: cell) {
+            return max(centerX + cell.bounds.width / 2.0, 0)
+        }
         if let positionX = currentAnimatedPositionX(of: cell) {
-            // positionX is center (iOS layer.position / Mac rest+translation).
             return max(positionX + cell.bounds.width / 2.0, 0)
         }
-        #if os(macOS)
-        // Prefer presentation position + translation (transform.translation.x).
-        // AppKit `presentation.frame` is unreliable with view-backed layers.
-        if let presentation = cell.layer?.presentation() {
-            let centerX = presentation.position.x + presentation.transform.m41
-            if centerX.isFinite {
-                return max(centerX + cell.bounds.width / 2.0, 0)
-            }
-        }
-        // Unknown geometry: treat as just-launched at the right edge so we
-        // *block* the track. Falling back to a small maxX falsely allows
-        // overlap (the regression from transform-based scrolling).
-        let viewW = view?.bounds.width ?? 0
-        return viewW + max(cell.bounds.width, 1)
-        #else
         let presentedMaxX = cell.realFrame.maxX
-        return presentedMaxX.isFinite ? max(presentedMaxX, 0) : 0
-        #endif
+        if presentedMaxX.isFinite {
+            return max(presentedMaxX, 0)
+        }
+        // Still animating but geometry unreadable: block this track once (safe).
+        if animation(for: cell, key: FLOATING_ANIMATION_KEY) != nil {
+            let viewW = view?.bounds.width ?? 0
+            return viewW + max(cell.bounds.width, 1)
+        }
+        return 0
     }
 
-    /// A reused layer can briefly expose the previous animation's presentation
-    /// position. Derive the current generation's position from its animation.
+    /// Live center X from the presentation layer (what the user actually sees).
+    private func presentationCenterX(of cell: DanmakuCell) -> CGFloat? {
+        #if os(macOS)
+        guard let presentation = cell.layer?.presentation() else { return nil }
+        let x = presentation.frame.midX
+        #else
+        guard let presentation = cell.layer.presentation() else { return nil }
+        let x = presentation.position.x
+        #endif
+        return x.isFinite ? x : nil
+    }
+
+    /// On-screen center X when baking a freeze.
+    /// **Presentation first** — wall-clock progress often disagrees with pixels and
+    /// was the main cause of left/right jumps on pause and speed change.
+    private func freezeSampleCenterX(of cell: DanmakuCell) -> CGFloat {
+        if let presented = presentationCenterX(of: cell) {
+            return presented
+        }
+        if let animated = currentAnimatedPositionX(of: cell) {
+            return animated
+        }
+        #if os(macOS)
+        if let layer = cell.layer {
+            let modelX = cell.frame.midX + layer.transform.m41
+            if modelX.isFinite { return modelX }
+        }
+        let mid = cell.frame.midX
+        if mid.isFinite { return mid }
+        #else
+        let modelX = cell.layer.position.x
+        if modelX.isFinite { return modelX }
+        #endif
+        return (view?.bounds.width ?? 0) + max(cell.bounds.width, 1) / 2.0
+    }
+
+    /// Derive center X from the running animation's from/to + progress.
+    /// Used when presentation is unavailable (e.g. just after remove).
     private func currentAnimatedPositionX(of cell: DanmakuCell) -> CGFloat? {
         guard let animation = animation(for: cell, key: FLOATING_ANIMATION_KEY) as? CABasicAnimation else {
             return nil
@@ -274,8 +326,6 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
 
         let progress = floatingAnimationProgress(animation, on: cell)
 
-        // Prefer absolute center path stored when the animation was created.
-        // This stays correct for both position.x (iOS) and transform.translation.x (macOS).
         if let fromAbs = (animation.value(forKey: DANMAKU_FROM_CENTER_X_KEY) as? NSNumber)?.doubleValue,
            let toAbs = (animation.value(forKey: DANMAKU_TO_CENTER_X_KEY) as? NSNumber)?.doubleValue,
            fromAbs.isFinite,
@@ -291,36 +341,39 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
             return nil
         }
 
-        #if os(macOS)
-        // Legacy path: from/to are translation deltas (0 → -travel).
-        let restX = cell.layer?.position.x ?? cell.frame.midX
-        let translation = fromX + (toX - fromX) * progress
-        let positionX = restX + translation
-        #else
         let positionX = fromX + (toX - fromX) * progress
-        #endif
         return positionX.isFinite ? CGFloat(positionX) : nil
     }
 
-    /// Progress in [0, 1] for the floating scroll animation.
-    /// Prefer wall-clock start + applied speed (stable on macOS); fall back to beginTime.
+    /// Progress in [0, 1]. Prefer geometry from presentation (matches pixels),
+    /// then layer timebase, then wall-clock stamp.
     private func floatingAnimationProgress(_ animation: CAAnimation, on cell: DanmakuCell) -> Double {
         let duration = animation.duration
         guard duration > 0, duration.isFinite else { return 1 }
 
-        // Prefer wall-clock start stamped at install. `animation.duration` already
-        // accounts for playingSpeed (displayTime / speed), so progress is linear
-        // against CACurrentMediaTime — more reliable than beginTime on macOS.
-        if let startedAt = (animation.value(forKey: DANMAKU_ANIMATION_STARTED_AT_KEY) as? NSNumber)?.doubleValue {
-            return min(max((CACurrentMediaTime() - startedAt) / duration, 0), 1)
+        // Geometric progress from live pixels — immune to beginTime/clock skew.
+        if let fromAbs = (animation.value(forKey: DANMAKU_FROM_CENTER_X_KEY) as? NSNumber)?.doubleValue,
+           let toAbs = (animation.value(forKey: DANMAKU_TO_CENTER_X_KEY) as? NSNumber)?.doubleValue,
+           fromAbs.isFinite,
+           toAbs.isFinite {
+            let span = toAbs - fromAbs
+            if abs(span) > 0.5, let x = presentationCenterX(of: cell).map(Double.init) {
+                return min(max((x - fromAbs) / span, 0), 1)
+            }
         }
 
         #if os(macOS)
-        let currentTime = cell.layer?.convertTime(CACurrentMediaTime(), from: nil) ?? CACurrentMediaTime()
+        let layerTime = cell.layer?.convertTime(CACurrentMediaTime(), from: nil) ?? CACurrentMediaTime()
         #else
-        let currentTime = cell.layer.convertTime(CACurrentMediaTime(), from: nil)
+        let layerTime = cell.layer.convertTime(CACurrentMediaTime(), from: nil)
         #endif
-        return min(max((currentTime - animation.beginTime) / duration, 0), 1)
+        if animation.beginTime > 0 {
+            return min(max((layerTime - animation.beginTime) / duration, 0), 1)
+        }
+        if let startedAt = (animation.value(forKey: DANMAKU_ANIMATION_STARTED_AT_KEY) as? NSNumber)?.doubleValue {
+            return min(max((CACurrentMediaTime() - startedAt) / duration, 0), 1)
+        }
+        return min(max((layerTime - animation.beginTime) / duration, 0), 1)
     }
 
     private func numberValue(_ value: Any?) -> Double? {
@@ -333,9 +386,15 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
     }
     
     func play() {
+        #if os(macOS)
+        // Resume CA timebase only — never reinstall / never touch frame (prevents track hop).
+        cells.forEach { resumeLayerClock(of: $0, speed: playingSpeed) }
+        #else
+        // iOS: re-install remaining path from baked center after freeze.
         cells.forEach {
             addAnimation(to: $0)
         }
+        #endif
     }
     
     func play(_ danmaku: DanmakuCellModel) -> Bool {
@@ -343,10 +402,7 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
             return c.model?.isEqual(to: danmaku) ?? false
         }) else { return false }
         #if os(macOS)
-        if let layer = findCell.layer {
-            layer.speed = 1.0
-            layer.timeOffset = 0
-        }
+        resumeLayerClock(of: findCell, speed: playingSpeed)
         #else
         addAnimation(to: findCell)
         #endif
@@ -354,9 +410,15 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
     }
     
     func pause() {
+        #if os(macOS)
+        // Freeze presentation in place via layer clock. Do NOT bake frame/position —
+        // that was rewriting Y and jumping cells to lower tracks on AppKit.
+        cells.forEach { pauseLayerClock(of: $0) }
+        #else
         cells.forEach {
             freezeAnimation(on: $0)
         }
+        #endif
     }
     
     func pause(_ danmaku: DanmakuCellModel) -> Bool {
@@ -364,16 +426,7 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
             return c.model?.isEqual(to: danmaku) ?? false
         }) else { return false }
         #if os(macOS)
-        let realFrame = findCell.realFrame
-        findCell.frame.origin = CGPoint(
-            x: realFrame.midX - findCell.bounds.width / 2.0,
-            y: realFrame.midY - findCell.bounds.height / 2.0
-        )
-        if let layer = findCell.layer {
-            let pausedTime = layer.convertTime(CACurrentMediaTime(), from: nil)
-            layer.speed = 0.0
-            layer.timeOffset = pausedTime
-        }
+        pauseLayerClock(of: findCell)
         #else
         freezeAnimation(on: findCell)
         #endif
@@ -395,15 +448,29 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
     
     func sync(_ danmaku: DanmakuCell, at progress: Float) {
         guard let model = danmaku.model else { return }
-        let totalWidth = view!.frame.width + danmaku.bounds.width
-        let syncFrame = CGRect(x: view!.frame.width - totalWidth * CGFloat(progress), y: positionY - danmaku.bounds.height / 2.0, width: danmaku.bounds.width, height: danmaku.bounds.height)
+        let cellW = max(danmaku.bounds.width, 1)
+        let cellH = max(danmaku.bounds.height, 1)
+        let totalWidth = view!.frame.width + cellW
+        let originX = view!.frame.width - totalWidth * CGFloat(progress)
+        let syncFrame = CGRect(
+            x: originX,
+            y: positionY - cellH / 2.0,
+            width: cellW,
+            height: cellH
+        )
         cells.append(danmaku)
         #if os(macOS)
         danmaku.layer?.opacity = 1
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        danmaku.frame = syncFrame
+        danmaku.layer?.transform = CATransform3DIdentity
+        CATransaction.commit()
         #else
         danmaku.layer.opacity = 1
-        #endif
         danmaku.frame = syncFrame
+        danmaku.layer.position = CGPoint(x: syncFrame.midX, y: positionY)
+        #endif
         danmaku.model?.track = index
         danmaku.animationTime = model.displayTime * Double(progress)
     }
@@ -485,90 +552,144 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
     
     private func addAnimation(to danmaku: DanmakuCell) {
         guard let cellModel = danmaku.model else { return }
+
         let viewW = view!.bounds.width
         let cellW = max(danmaku.bounds.width, 1)
-        // Full right→left travel (same distance as iOS center-based path).
-        let travel = viewW + cellW
-        let rate = max(CGFloat(travel) / max(viewW + cellW, 1), 0)
+        // Full right→left center travel: (viewW + cellW/2) → (-cellW/2).
+        let fullTravel = viewW + cellW
+        let endCenterX = -cellW / 2.0
         let speed = max(playingSpeed, 0.01)
+
         #if os(macOS)
-        // transform.translation.x: model frame stays put; GPU only translates.
-        // Avoids AppKit reconciling NSView.frame vs layer.position every tick (stutter).
-        let restCenterX = danmaku.layer?.position.x
-            ?? (danmaku.frame.origin.x + cellW / 2.0)
-        let fromCenterX = restCenterX
-        let toCenterX = restCenterX - travel
+        // AppKit owns the view-backed layer's frame; animation only translates X.
+        // Pause and playback rate use the layer clock, so geometry never gets baked.
+        guard let layer = danmaku.layer else { return }
+
+        let fromCenterX = danmaku.frame.midX
+        let remainingTravel = max(fromCenterX - endCenterX, 0)
+        let rate = fullTravel > 0 ? min(remainingTravel / fullTravel, 1) : 0
+        let toCenterX = endCenterX
+
+        let duration = floatingAnimationDuration(
+            displayTime: cellModel.displayTime,
+            rate: rate,
+            speed: 1
+        )
+
         let animation = CABasicAnimation(keyPath: "transform.translation.x")
         _ = configureAnimation(animation, for: danmaku, playingSpeed: speed)
-        animation.duration = (cellModel.displayTime * Double(rate)) / Double(speed)
+        animation.duration = duration
         animation.timingFunction = CAMediaTimingFunction(name: .linear)
         animation.delegate = self
-        animation.fromValue = NSNumber(value: 0)
-        animation.toValue = NSNumber(value: Double(-travel))
+        animation.fromValue = NSNumber(value: 0.0)
+        animation.toValue = NSNumber(value: Double(-remainingTravel))
         animation.setValue(NSNumber(value: Double(fromCenterX)), forKey: DANMAKU_FROM_CENTER_X_KEY)
         animation.setValue(NSNumber(value: Double(toCenterX)), forKey: DANMAKU_TO_CENTER_X_KEY)
         animation.isRemovedOnCompletion = false
         animation.fillMode = .forwards
-        if let layer = danmaku.layer {
-            // Absolute media time → layer time (smoother than raw CACurrentMediaTime assign).
-            let t = layer.convertTime(CACurrentMediaTime(), from: nil)
-            animation.beginTime = t
-            // Re-stamp wall clock after beginTime is finalized (progress math uses this).
-            animation.setValue(NSNumber(value: CACurrentMediaTime()), forKey: DANMAKU_ANIMATION_STARTED_AT_KEY)
-            layer.add(animation, forKey: FLOATING_ANIMATION_KEY)
-        }
+
+        resetLayerClock(layer)
+        layer.speed = speed
+        let layerNow = layer.convertTime(CACurrentMediaTime(), from: nil)
+        animation.beginTime = layerNow
+        animation.setValue(NSNumber(value: CACurrentMediaTime()), forKey: DANMAKU_ANIMATION_STARTED_AT_KEY)
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.transform = CATransform3DIdentity
+        CATransaction.commit()
+        layer.add(animation, forKey: FLOATING_ANIMATION_KEY)
         #else
         let fromCenterX = danmaku.layer.position.x
-        let toCenterX = -danmaku.bounds.width / 2.0
+        let remainingTravel = max(fromCenterX - endCenterX, 0)
+        let rate = fullTravel > 0 ? min(remainingTravel / fullTravel, 1) : 0
+        let toCenterX = endCenterX
+
         let animation = CABasicAnimation(keyPath: "position.x")
-        animation.beginTime = configureAnimation(animation, for: danmaku, playingSpeed: playingSpeed)
-        animation.duration = (cellModel.displayTime * Double(rate)) / Double(playingSpeed)
+        _ = configureAnimation(animation, for: danmaku, playingSpeed: speed)
+        animation.duration = floatingAnimationDuration(
+            displayTime: cellModel.displayTime,
+            rate: rate,
+            speed: speed
+        )
         animation.timingFunction = CAMediaTimingFunction(name: .linear)
         animation.delegate = self
-        animation.fromValue = NSNumber(value: Float(fromCenterX))
-        animation.toValue = NSNumber(value: Float(toCenterX))
+        animation.fromValue = NSNumber(value: Double(fromCenterX))
+        animation.toValue = NSNumber(value: Double(toCenterX))
         animation.setValue(NSNumber(value: Double(fromCenterX)), forKey: DANMAKU_FROM_CENTER_X_KEY)
         animation.setValue(NSNumber(value: Double(toCenterX)), forKey: DANMAKU_TO_CENTER_X_KEY)
         animation.isRemovedOnCompletion = false
         animation.fillMode = .forwards
+        animation.beginTime = CACurrentMediaTime()
+        animation.setValue(NSNumber(value: animation.beginTime), forKey: DANMAKU_ANIMATION_STARTED_AT_KEY)
         danmaku.layer.add(animation, forKey: FLOATING_ANIMATION_KEY)
         #endif
     }
 
+    // MARK: macOS layer clock
+
+    #if os(macOS)
+    /// Reset media timing so a new animation is not stuck paused or time-shifted.
+    private func resetLayerClock(_ layer: CALayer) {
+        layer.speed = 1.0
+        layer.timeOffset = 0
+        layer.beginTime = 0
+    }
+
+    /// Freeze presentation exactly where it is (Apple CA pause recipe).
+    private func pauseLayerClock(of cell: DanmakuCell) {
+        guard let layer = cell.layer else { return }
+        if layer.speed == 0 { return }
+        let t = layer.convertTime(CACurrentMediaTime(), from: nil)
+        layer.speed = 0
+        layer.timeOffset = t
+    }
+
+    /// Resume after `pauseLayerClock` at the requested playback rate.
+    private func resumeLayerClock(of cell: DanmakuCell, speed: Float) {
+        guard let layer = cell.layer else { return }
+        let rate = max(speed, 0.01)
+        if layer.speed == 0 {
+            let pausedTime = layer.timeOffset
+            let parentTime = layer.superlayer?.convertTime(CACurrentMediaTime(), from: nil)
+                ?? CACurrentMediaTime()
+            layer.speed = rate
+            layer.timeOffset = 0
+            layer.beginTime = parentTime - pausedTime / Double(rate)
+        } else {
+            layer.speed = rate
+        }
+    }
+
+    #endif
+
+    /// Duration for the remaining fraction of a floating path.
+    /// A zero raw duration (already off-screen) still gets one frame so
+    /// `animationDidStop` runs and the track is released — never leave a stuck cell.
+    private func floatingAnimationDuration(displayTime: Double, rate: CGFloat, speed: Float) -> CFTimeInterval {
+        let raw = (displayTime * Double(rate)) / Double(speed)
+        if raw > 0, raw.isFinite {
+            return raw
+        }
+        return 1.0 / 120.0
+    }
+
+    /// iOS: bake on-screen center into model and remove animation.
+    /// macOS pause/speed no longer call this (layer clock instead). Kept for any
+    /// shared callers and for the iOS speed-change path.
     private func freezeAnimation(on danmaku: DanmakuCell) {
-        let animatedPositionX = currentAnimatedPositionX(of: danmaku)
-        let realFrame = danmaku.realFrame
+        let midX = freezeSampleCenterX(of: danmaku)
+        guard midX.isFinite else {
+            invalidateAnimation(for: danmaku, key: FLOATING_ANIMATION_KEY)
+            return
+        }
         #if os(macOS)
-        let modelMidX = danmaku.frame.midX
-        let fallbackMidX = (view?.bounds.width ?? 0) + danmaku.bounds.width / 2.0
-        let midX = animatedPositionX
-            ?? (realFrame.midX.isFinite
-                ? realFrame.midX
-                : (modelMidX.isFinite ? modelMidX : fallbackMidX))
-        let w = danmaku.bounds.width
-        let h = danmaku.bounds.height
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        // Bake translation into frame/position and clear transform.
-        danmaku.layer?.transform = CATransform3DIdentity
-        danmaku.frame = CGRect(
-            x: midX - w / 2.0,
-            y: positionY - h / 2.0,
-            width: w,
-            height: h
-        )
-        danmaku.layer?.position = CGPoint(x: midX, y: positionY)
-        CATransaction.commit()
+        // Should not be on the pause path; if invoked, only freeze the clock.
+        pauseLayerClock(of: danmaku)
         #else
-        let modelX = danmaku.layer.position.x
-        let fallbackX = (view?.bounds.width ?? 0) + danmaku.bounds.width / 2.0
-        let positionX = animatedPositionX
-            ?? (realFrame.midX.isFinite
-                ? realFrame.midX
-                : (modelX.isFinite ? modelX : fallbackX))
-        danmaku.layer.position = CGPoint(x: positionX, y: positionY)
-        #endif
+        danmaku.layer.position = CGPoint(x: midX, y: positionY)
         invalidateAnimation(for: danmaku, key: FLOATING_ANIMATION_KEY)
+        #endif
     }
     
 }
@@ -613,17 +734,26 @@ class DanmakuVerticalTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
 
     func updatePlayingSpeed(_ playingSpeed: Float, isPlaying: Bool) {
         guard self.playingSpeed != playingSpeed else { return }
+        self.playingSpeed = playingSpeed
+        #if os(macOS)
+        // Opacity timer is authored at 1×; live rate = layer.speed.
+        guard isPlaying else { return }
+        cells.forEach { cell in
+            guard let layer = cell.layer, layer.speed != 0 else { return }
+            layer.speed = max(playingSpeed, 0.01)
+        }
+        #else
         if isPlaying {
             cells.forEach {
                 invalidateAnimation(for: $0, key: TOP_ANIMATION_KEY)
             }
         }
-        self.playingSpeed = playingSpeed
         if isPlaying {
             cells.forEach {
                 addAnimation(to: $0)
             }
         }
+        #endif
     }
     
     func shoot(danmaku: DanmakuCell) {
@@ -651,9 +781,13 @@ class DanmakuVerticalTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
     }
     
     func play() {
+        #if os(macOS)
+        cells.forEach { resumeVerticalClock(of: $0) }
+        #else
         cells.forEach {
             addAnimation(to: $0)
         }
+        #endif
     }
     
     func play(_ danmaku: DanmakuCellModel) -> Bool {
@@ -661,10 +795,7 @@ class DanmakuVerticalTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
             return c.model?.isEqual(to: danmaku) ?? false
         }) else { return false }
         #if os(macOS)
-        if let layer = findCell.layer {
-            layer.speed = 1.0
-            layer.timeOffset = 0
-        }
+        resumeVerticalClock(of: findCell)
         #else
         addAnimation(to: findCell)
         #endif
@@ -672,9 +803,13 @@ class DanmakuVerticalTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
     }
     
     func pause() {
+        #if os(macOS)
+        cells.forEach { pauseVerticalClock(of: $0) }
+        #else
         cells.forEach {
             invalidateAnimation(for: $0, key: TOP_ANIMATION_KEY)
         }
+        #endif
     }
     
     func pause(_ danmaku: DanmakuCellModel) -> Bool {
@@ -682,16 +817,37 @@ class DanmakuVerticalTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
             return c.model?.isEqual(to: danmaku) ?? false
         }) else { return false }
         #if os(macOS)
-        if let layer = findCell.layer {
-            let pausedTime = layer.convertTime(CACurrentMediaTime(), from: nil)
-            layer.speed = 0.0
-            layer.timeOffset = pausedTime
-        }
+        pauseVerticalClock(of: findCell)
         #else
         invalidateAnimation(for: findCell, key: TOP_ANIMATION_KEY)
         #endif
         return true
     }
+
+    #if os(macOS)
+    private func pauseVerticalClock(of cell: DanmakuCell) {
+        guard let layer = cell.layer, layer.speed != 0 else { return }
+        let t = layer.convertTime(CACurrentMediaTime(), from: nil)
+        layer.speed = 0
+        layer.timeOffset = t
+    }
+
+    private func resumeVerticalClock(of cell: DanmakuCell) {
+        guard let layer = cell.layer else { return }
+        let rate = max(playingSpeed, 0.01)
+        if layer.speed == 0 {
+            let pausedTime = layer.timeOffset
+            layer.speed = 1.0
+            layer.timeOffset = 0
+            layer.beginTime = 0
+            let now = layer.convertTime(CACurrentMediaTime(), from: nil)
+            layer.beginTime = now - pausedTime
+            layer.speed = rate
+        } else {
+            layer.speed = rate
+        }
+    }
+    #endif
     
     func stop() {
         cells.forEach {
@@ -769,13 +925,30 @@ class DanmakuVerticalTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         guard let cellModel = danmaku.model else { return }
         let rate = cellModel.displayTime == 0 ? 0 : max(0, 1 - danmaku.animationTime / cellModel.displayTime)
         #if os(macOS)
-        // Ensure horizontally centered before scheduling fade-out, matching DanmuKitMac
+        // Ensure horizontally centered before scheduling fade-out
         if let vw = view {
             let originX = (vw.bounds.width - danmaku.bounds.width) / 2.0
             let originY = positionY - danmaku.bounds.height / 2.0
             danmaku.frame.origin = CGPoint(x: originX, y: originY)
         }
-        #endif
+        // Author hold time at 1×; apply playback rate via layer.speed.
+        let animation = CABasicAnimation(keyPath: "opacity")
+        _ = configureAnimation(animation, for: danmaku, playingSpeed: 1.0)
+        if let layer = danmaku.layer {
+            layer.speed = 1.0
+            layer.timeOffset = 0
+            layer.beginTime = 0
+            let layerNow = layer.convertTime(CACurrentMediaTime(), from: nil)
+            animation.beginTime = layerNow + cellModel.displayTime * rate
+            animation.duration = 0
+            animation.delegate = self
+            animation.toValue = 0
+            animation.isRemovedOnCompletion = false
+            animation.fillMode = .forwards
+            layer.add(animation, forKey: TOP_ANIMATION_KEY)
+            layer.speed = max(playingSpeed, 0.01)
+        }
+        #else
         let animation = CABasicAnimation(keyPath: "opacity")
         let startedAt = configureAnimation(animation, for: danmaku, playingSpeed: playingSpeed)
         animation.beginTime = startedAt + cellModel.displayTime * rate / Double(playingSpeed)
@@ -786,9 +959,6 @@ class DanmakuVerticalTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         animation.toValue = 0
         animation.isRemovedOnCompletion = false
         animation.fillMode = .forwards
-        #if os(macOS)
-        danmaku.layer?.add(animation, forKey: TOP_ANIMATION_KEY)
-        #else
         danmaku.layer.add(animation, forKey: TOP_ANIMATION_KEY)
         #endif
     }
@@ -799,7 +969,13 @@ func prepare(danmaku: DanmakuCell) {
     danmaku.animationGeneration &+= 1
     danmaku.animationTime = 0
     #if os(macOS)
-    danmaku.layer?.opacity = 1
+    if let layer = danmaku.layer {
+        layer.opacity = 1
+        // Cell reuse must not inherit a paused/time-shifted clock.
+        layer.speed = 1.0
+        layer.timeOffset = 0
+        layer.beginTime = 0
+    }
     #else
     danmaku.layer.opacity = 1
     #endif

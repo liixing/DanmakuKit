@@ -442,6 +442,287 @@ final class PlaybackRateRetimingTests: XCTestCase {
         XCTAssertTrue(replacement.duration.isFinite, "Non-finite reused geometry created an animation that never ends")
     }
 
+    /// Mid-flight retiming must scale duration by remaining distance, not full displayTime.
+    /// Otherwise long-press accelerate leaves older cells at ~1x while new cells run at 2x.
+    func testFloatingMidFlightRetimingScalesDurationByRemainingDistance() throws {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 30))
+        let container = UIView(frame: window.bounds)
+        window.addSubview(container)
+        window.isHidden = false
+
+        let track = DanmakuFloatingTrack(view: container)
+        track.positionY = 15
+        track.playingSpeed = 1
+
+        let cellWidth: CGFloat = 100
+        let displayTime: Double = 10
+        let cell = TestDanmakuCell(frame: CGRect(x: 320, y: 0, width: cellWidth, height: 20))
+        cell.model = TestDanmakuModel(
+            identifier: "mid-flight-retime",
+            type: .floating,
+            size: cell.bounds.size,
+            displayTime: displayTime
+        )
+        container.addSubview(cell)
+        track.shoot(danmaku: cell)
+
+        let fullTravel = container.bounds.width + cellWidth
+        let startCenterX = container.bounds.width + cellWidth / 2.0
+        let endCenterX = -cellWidth / 2.0
+        let midCenterX = (startCenterX + endCenterX) / 2.0
+
+        // Force a deterministic mid-track position, then retime as long-press would.
+        track.pause()
+        cell.layer.position = CGPoint(x: midCenterX, y: 15)
+        cell.animationTime = displayTime / 2.0
+        track.updatePlayingSpeed(2, isPlaying: true)
+
+        let animation = try XCTUnwrap(
+            cell.layer.animation(forKey: FLOATING_ANIMATION_KEY) as? CABasicAnimation
+        )
+        let remainingTravel = midCenterX - endCenterX
+        let expectedDuration = displayTime * Double(remainingTravel / fullTravel) / 2.0
+        XCTAssertEqual(
+            animation.duration,
+            expectedDuration,
+            accuracy: 0.001,
+            "Retiming must use remaining distance, not the full displayTime"
+        )
+
+        let fromX = try XCTUnwrap((animation.value(forKey: DANMAKU_FROM_CENTER_X_KEY) as? NSNumber)?.doubleValue)
+        let toX = try XCTUnwrap((animation.value(forKey: DANMAKU_TO_CENTER_X_KEY) as? NSNumber)?.doubleValue)
+        let retimedVelocity = abs(toX - fromX) / animation.duration
+        let expectedVelocity = Double(fullTravel) * 2.0 / displayTime
+        XCTAssertEqual(
+            retimedVelocity,
+            expectedVelocity,
+            accuracy: 0.5,
+            "An in-flight cell must match full-path velocity at the new speed"
+        )
+    }
+
+    /// Retiming a cell that has already reached the exit must not leave a stuck track occupant.
+    func testRetimingOffscreenCellStillReleasesTheTrack() throws {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 30))
+        let container = UIView(frame: window.bounds)
+        window.addSubview(container)
+        window.isHidden = false
+
+        let track = DanmakuFloatingTrack(view: container)
+        track.positionY = 15
+        track.playingSpeed = 1
+
+        let cell = TestDanmakuCell(frame: CGRect(x: 320, y: 0, width: 80, height: 20))
+        cell.model = TestDanmakuModel(
+            identifier: "already-exited",
+            type: .floating,
+            size: cell.bounds.size,
+            displayTime: 8
+        )
+        container.addSubview(cell)
+        track.shoot(danmaku: cell)
+
+        track.pause()
+        // Place past the left exit so remaining travel is 0.
+        cell.layer.position = CGPoint(x: -cell.bounds.width, y: 15)
+        track.updatePlayingSpeed(2, isPlaying: true)
+
+        let animation = try XCTUnwrap(cell.layer.animation(forKey: FLOATING_ANIMATION_KEY))
+        XCTAssertGreaterThan(animation.duration, 0, "Must install a completable animation to release the track")
+
+        // Drive completion.
+        track.animationDidStop(animation, finished: true)
+        XCTAssertEqual(track.danmakuCount, 0, "Off-screen retime must still free the floating track")
+        XCTAssertTrue(
+            track.canShoot(
+                danmaku: TestDanmakuModel(identifier: "next", type: .floating, size: cell.bounds.size, displayTime: 8)
+            )
+        )
+    }
+
+    /// Pause then resume mid-flight must continue from the baked position with remaining duration
+    /// (not restart a full displayTime from mid-screen at the wrong velocity).
+    func testPauseResumeMidFlightUsesRemainingDistance() throws {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 30))
+        let container = UIView(frame: window.bounds)
+        window.addSubview(container)
+        window.isHidden = false
+
+        let track = DanmakuFloatingTrack(view: container)
+        track.positionY = 15
+        track.playingSpeed = 1
+
+        let cellWidth: CGFloat = 100
+        let displayTime: Double = 10
+        let cell = TestDanmakuCell(frame: CGRect(x: 320, y: 0, width: cellWidth, height: 20))
+        cell.model = TestDanmakuModel(
+            identifier: "pause-resume",
+            type: .floating,
+            size: cell.bounds.size,
+            displayTime: displayTime
+        )
+        container.addSubview(cell)
+        track.shoot(danmaku: cell)
+
+        let fullTravel = container.bounds.width + cellWidth
+        let startCenterX = container.bounds.width + cellWidth / 2.0
+        let endCenterX = -cellWidth / 2.0
+        let midCenterX = startCenterX - fullTravel * 0.3
+
+        track.pause()
+        cell.layer.position = CGPoint(x: midCenterX, y: 15)
+        track.play()
+
+        let animation = try XCTUnwrap(
+            cell.layer.animation(forKey: FLOATING_ANIMATION_KEY) as? CABasicAnimation
+        )
+        let fromX = try XCTUnwrap((animation.value(forKey: DANMAKU_FROM_CENTER_X_KEY) as? NSNumber)?.doubleValue)
+        XCTAssertEqual(fromX, Double(midCenterX), accuracy: 0.5, "Resume must start from the paused position")
+
+        let remainingTravel = midCenterX - endCenterX
+        let expectedDuration = displayTime * Double(remainingTravel / fullTravel)
+        XCTAssertEqual(animation.duration, expectedDuration, accuracy: 0.05)
+
+        let velocity = abs(
+            (try XCTUnwrap((animation.value(forKey: DANMAKU_TO_CENTER_X_KEY) as? NSNumber)?.doubleValue) - fromX)
+        ) / animation.duration
+        XCTAssertEqual(velocity, Double(fullTravel) / displayTime, accuracy: 0.5)
+    }
+
+    /// Freeze/retime must not sample the model rest pose (right edge) when metadata is available.
+    func testFreezeDoesNotJumpToLaunchRestPose() throws {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 30))
+        let container = UIView(frame: window.bounds)
+        window.addSubview(container)
+        window.isHidden = false
+
+        let track = DanmakuFloatingTrack(view: container)
+        track.positionY = 15
+
+        let cell = TestDanmakuCell(frame: CGRect(x: 320, y: 0, width: 80, height: 20))
+        cell.model = TestDanmakuModel(
+            identifier: "no-jump",
+            type: .floating,
+            size: cell.bounds.size,
+            displayTime: 8
+        )
+        container.addSubview(cell)
+        track.shoot(danmaku: cell)
+
+        // Leave model at launch while presentation/metadata report mid-flight
+        // (simulates Core Animation leaving model pose at the rest position).
+        let launchX = cell.layer.position.x
+        let midX = launchX - 150
+        cell.layer.position = CGPoint(x: midX, y: 15)
+
+        // Replace animation metadata as if the cell had already traveled.
+        if let old = cell.layer.animation(forKey: FLOATING_ANIMATION_KEY) as? CABasicAnimation {
+            let replacement = CABasicAnimation(keyPath: "position.x")
+            replacement.fromValue = NSNumber(value: Float(launchX))
+            replacement.toValue = NSNumber(value: Float(-40))
+            replacement.duration = 8
+            replacement.beginTime = CACurrentMediaTime() - 3
+            replacement.setValue(cell, forKey: DANMAKU_CELL_KEY)
+            replacement.setValue(NSNumber(value: cell.animationGeneration), forKey: DANMAKU_ANIMATION_GENERATION_KEY)
+            replacement.setValue(NSNumber(value: CACurrentMediaTime() - 3), forKey: DANMAKU_ANIMATION_STARTED_AT_KEY)
+            replacement.setValue(NSNumber(value: Float(1)), forKey: DANMAKU_ANIMATION_SPEED_KEY)
+            replacement.setValue(NSNumber(value: Double(launchX)), forKey: DANMAKU_FROM_CENTER_X_KEY)
+            replacement.setValue(NSNumber(value: Double(-40)), forKey: DANMAKU_TO_CENTER_X_KEY)
+            replacement.isRemovedOnCompletion = false
+            replacement.fillMode = .forwards
+            // Keep model at launch to ensure freeze does not read it first.
+            cell.layer.position = CGPoint(x: launchX, y: 15)
+            cell.layer.add(replacement, forKey: FLOATING_ANIMATION_KEY)
+            _ = old
+        }
+
+        track.updatePlayingSpeed(2, isPlaying: true)
+
+        let animation = try XCTUnwrap(
+            cell.layer.animation(forKey: FLOATING_ANIMATION_KEY) as? CABasicAnimation
+        )
+        let fromX = try XCTUnwrap((animation.value(forKey: DANMAKU_FROM_CENTER_X_KEY) as? NSNumber)?.doubleValue)
+        XCTAssertLessThan(
+            fromX,
+            Double(launchX) - 50,
+            "Freeze sampled the launch rest pose (\(fromX)) instead of in-flight progress"
+        )
+        XCTAssertGreaterThan(fromX, -40)
+    }
+
+    /// Long-press accelerate → release → accelerate again must keep old and new cells aligned in speed.
+    func testLongPressAccelerateCycleKeepsExistingAndNewCellsAtSameVelocity() throws {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 30))
+        let container = UIView(frame: window.bounds)
+        window.addSubview(container)
+        window.isHidden = false
+
+        let track = DanmakuFloatingTrack(view: container)
+        track.positionY = 15
+        track.playingSpeed = 1
+
+        let cellWidth: CGFloat = 80
+        let displayTime: Double = 8
+        let older = TestDanmakuCell(frame: CGRect(x: 320, y: 0, width: cellWidth, height: 20))
+        older.model = TestDanmakuModel(
+            identifier: "older",
+            type: .floating,
+            size: older.bounds.size,
+            displayTime: displayTime
+        )
+        container.addSubview(older)
+        track.shoot(danmaku: older)
+
+        let startCenterX = container.bounds.width + cellWidth / 2.0
+        let endCenterX = -cellWidth / 2.0
+        let midCenterX = startCenterX - (startCenterX - endCenterX) * 0.4
+
+        // First accelerate, release, accelerate again (the reported collision repro).
+        track.updatePlayingSpeed(2, isPlaying: true)
+        track.updatePlayingSpeed(1, isPlaying: true)
+        track.pause()
+        older.layer.position = CGPoint(x: midCenterX, y: 15)
+        older.animationTime = displayTime * 0.4
+        track.updatePlayingSpeed(2, isPlaying: true)
+
+        let newer = TestDanmakuCell(frame: CGRect(x: 320, y: 0, width: cellWidth, height: 20))
+        newer.model = TestDanmakuModel(
+            identifier: "newer",
+            type: .floating,
+            size: newer.bounds.size,
+            displayTime: displayTime
+        )
+        container.addSubview(newer)
+        track.shoot(danmaku: newer)
+
+        func velocity(of cell: DanmakuCell) throws -> Double {
+            let animation = try XCTUnwrap(
+                cell.layer.animation(forKey: FLOATING_ANIMATION_KEY) as? CABasicAnimation
+            )
+            let fromX = try XCTUnwrap(
+                (animation.value(forKey: DANMAKU_FROM_CENTER_X_KEY) as? NSNumber)?.doubleValue
+            )
+            let toX = try XCTUnwrap(
+                (animation.value(forKey: DANMAKU_TO_CENTER_X_KEY) as? NSNumber)?.doubleValue
+            )
+            XCTAssertGreaterThan(animation.duration, 0)
+            return abs(toX - fromX) / animation.duration
+        }
+
+        let olderVelocity = try velocity(of: older)
+        let newerVelocity = try velocity(of: newer)
+        XCTAssertEqual(
+            olderVelocity,
+            newerVelocity,
+            accuracy: 0.5,
+            "After a second long-press accelerate, older cells must not lag at the previous speed"
+        )
+
+        let fullTravel = Double(container.bounds.width + cellWidth)
+        XCTAssertEqual(olderVelocity, fullTravel * 2.0 / displayTime, accuracy: 0.5)
+        XCTAssertEqual(newerVelocity, fullTravel * 2.0 / displayTime, accuracy: 0.5)
+    }
+
 }
 
 private final class TestDanmakuCell: DanmakuCell {}

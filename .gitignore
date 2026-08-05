@@ -15,9 +15,16 @@ xcuserdata/
 *.xccheckout
 profile
 *.moved-aside
-DerivedData
+DerivedData/
 *.hmap
 *.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager (local build / resolution artifacts)
+.build/
+.swiftpm/
+Packages/
 
 # Bundler
 .bundle
