@@ -269,21 +269,14 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
     }
 
     private func currentFrameMaxX(of cell: DanmakuCell) -> CGFloat {
-        #if os(macOS)
-        // AppKit presentation layers are asynchronous and can briefly report a
-        // frame ahead of the animation clock, releasing an occupied track early.
+        // A reused cell can briefly expose the previous animation's presentation
+        // layer. The current animation clock is generation-safe for collision checks.
         if let positionX = currentAnimatedPositionX(of: cell) {
             return max(positionX + cell.bounds.width / 2.0, 0)
         }
-        #endif
         if let centerX = presentationCenterX(of: cell) {
             return max(centerX + cell.bounds.width / 2.0, 0)
         }
-        #if !os(macOS)
-        if let positionX = currentAnimatedPositionX(of: cell) {
-            return max(positionX + cell.bounds.width / 2.0, 0)
-        }
-        #endif
         let presentedMaxX = cell.realFrame.maxX
         if presentedMaxX.isFinite {
             return max(presentedMaxX, 0)
@@ -309,16 +302,15 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
     }
 
     /// On-screen center X when baking a freeze.
-    /// **Presentation first** — wall-clock progress often disagrees with pixels and
-    /// was the main cause of left/right jumps on pause and speed change.
     private func freezeSampleCenterX(of cell: DanmakuCell) -> CGFloat {
+        #if os(macOS)
+        // AppKit animation uses the layer clock, so live pixels are authoritative.
         if let presented = presentationCenterX(of: cell) {
             return presented
         }
         if let animated = currentAnimatedPositionX(of: cell) {
             return animated
         }
-        #if os(macOS)
         if let layer = cell.layer {
             let modelX = cell.frame.midX + layer.transform.m41
             if modelX.isFinite { return modelX }
@@ -326,6 +318,14 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         let mid = cell.frame.midX
         if mid.isFinite { return mid }
         #else
+        // A reused UIKit layer can still present its previous generation for one
+        // frame. The current animation clock cannot inherit that stale position.
+        if let animated = currentAnimatedPositionX(of: cell) {
+            return animated
+        }
+        if let presented = presentationCenterX(of: cell) {
+            return presented
+        }
         let modelX = cell.layer.position.x
         if modelX.isFinite { return modelX }
         #endif
@@ -367,12 +367,14 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
         guard duration > 0, duration.isFinite else { return 1 }
 
         #if os(macOS)
+        let layerTime = cell.layer?.convertTime(CACurrentMediaTime(), from: nil)
+            ?? CACurrentMediaTime()
+        #else
+        let layerTime = cell.layer.convertTime(CACurrentMediaTime(), from: nil)
+        #endif
         if animation.beginTime > 0 {
-            let layerTime = cell.layer?.convertTime(CACurrentMediaTime(), from: nil)
-                ?? CACurrentMediaTime()
             return min(max((layerTime - animation.beginTime) / duration, 0), 1)
         }
-        #endif
 
         // Geometric progress from live pixels — immune to beginTime/clock skew.
         if let fromAbs = (animation.value(forKey: DANMAKU_FROM_CENTER_X_KEY) as? NSNumber)?.doubleValue,
@@ -385,14 +387,6 @@ class DanmakuFloatingTrack: NSObject, DanmakuTrack, CAAnimationDelegate {
             }
         }
 
-        #if os(macOS)
-        let layerTime = cell.layer?.convertTime(CACurrentMediaTime(), from: nil) ?? CACurrentMediaTime()
-        #else
-        let layerTime = cell.layer.convertTime(CACurrentMediaTime(), from: nil)
-        #endif
-        if animation.beginTime > 0 {
-            return min(max((layerTime - animation.beginTime) / duration, 0), 1)
-        }
         if let startedAt = (animation.value(forKey: DANMAKU_ANIMATION_STARTED_AT_KEY) as? NSNumber)?.doubleValue {
             return min(max((CACurrentMediaTime() - startedAt) / duration, 0), 1)
         }
